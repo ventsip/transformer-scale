@@ -37,7 +37,9 @@ const settings: Settings = {
 
 // Renderers.
 const app = document.getElementById('app')!;
-const renderer = new THREE.WebGPURenderer({ antialias: true, logarithmicDepthBuffer: true });
+// ?webgl forces the WebGL2 fallback (for testing, or where WebGPU misbehaves).
+const forceWebGL = new URLSearchParams(location.search).has('webgl');
+const renderer = new THREE.WebGPURenderer({ antialias: true, logarithmicDepthBuffer: true, forceWebGL });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 app.appendChild(renderer.domElement);
