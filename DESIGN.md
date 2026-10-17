@@ -1,0 +1,33 @@
+# Design principles
+
+## Encoding
+
+- **1 unit = 1 element** along both floor axes. A tensor's footprint is its true shape, so area = element count.
+- **Thickness = bytes per element**, on a separate exaggerated scale (1 byte = 64 units). Footprint × thickness ∝ memory.
+  A "uniform" mode drops precision and compares element counts only.
+- **Orientation:** weights lie with their *input* dim along X and *output* dim along Z.
+  Activations lie with their *feature* dim along X and *tokens* along Z, so the token axis grows toward the viewer.
+
+## Layout
+
+- One **floor** per stage: embedding, one per decoder layer, LM head. Floors stack along Y.
+- On each floor, **stations** run left to right in data-flow order. Weights sit in the back row (−Z),
+  the activations they produce in the front row (+Z).
+- Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
+
+## Honesty
+
+- **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are
+  drawn only on the focused floor. K and V are written to the KV cache and are drawn on every floor.
+- **Not-stored tensors are ghosts.** Attention scores (heads × T × T) are never materialized by fused attention
+  kernels; they are optional, translucent, and labelled as such.
+- **Never exaggerate silently.** Sub-pixel tensors (norm weights, logits) stay at true size; 1px edges keep them visible.
+  The thickness exaggeration is stated in the legend.
+- **Every object is inspectable:** shape, element count, bytes, and share of its category on hover.
+
+## Scope
+
+- Model: Llama-3-8B (`src/model/config.ts`); everything is derived from the config.
+- Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only.
+- Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
+  parameters and are not drawn as objects.
