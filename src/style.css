@@ -271,7 +271,7 @@ button.play {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 8px;
+  margin: 14px 0 2px;
   color: var(--muted);
 }
 

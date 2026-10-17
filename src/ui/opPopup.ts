@@ -98,22 +98,20 @@ function temperatureViz(body: HTMLElement): void {
   const top = barChart('Input: logits', 'Top 40 of 128,256 tokens, by rank (illustrative values)');
   const bottom = barChart('Output: logits ÷ T', 'Outlines: the input logits, on the same scale');
   const facts = el('div', { className: 'op-popup-facts' });
-  body.append(control, top.root, bottom.root, facts);
+  body.append(top.root, control, bottom.root, facts);
 
   const update = () => {
     const t = Number(slider.value);
     tValue.textContent = `T = ${t.toFixed(2)}`;
     const output = input.map((v) => v / t);
-    // One shared scale, so the output reads against the input.
-    const lo = Math.min(0, ...input, ...output);
-    const hi = Math.max(...input, ...output);
-    top.draw(input, null, lo, hi, (i) => `#${i + 1} · logit ${input[i].toFixed(2)}`);
-    bottom.draw(output, input, lo, hi, (i) => `#${i + 1} · ${input[i].toFixed(2)} ÷ ${t.toFixed(2)} = ${output[i].toFixed(2)}`);
+    // The input keeps its own fixed scale; the output scale fits both the output and the input outlines.
+    top.draw(input, null, Math.min(0, ...input), Math.max(...input), (i) => `#${i + 1} · logit ${input[i].toFixed(2)}`);
+    bottom.draw(output, input, Math.min(0, ...input, ...output), Math.max(...input, ...output), (i) => `#${i + 1} · ${input[i].toFixed(2)} ÷ ${t.toFixed(2)} = ${output[i].toFixed(2)}`);
     const f = softmaxFacts(logits, t);
     const pct = (x: number) => `${(100 * x).toPrecision(x < 0.1 ? 2 : 3)}%`;
     facts.innerHTML =
       `After the softmax that follows: the top token gets <b>${pct(f.top)}</b>, the 40 shown hold <b>${pct(f.shown)}</b>, ` +
-      `and <b>${f.for90.toLocaleString('en-US')}</b> token${f.for90 === 1 ? '' : 's'} make up 90% of the probability. ` +
+      `and <b>${f.for90.toLocaleString('en-US')}</b> ${f.for90 === 1 ? 'token makes' : 'tokens make'} up 90% of the probability. ` +
       (t < 1 ? 'T < 1 stretches the gaps between logits: sharper, more predictable.' : t > 1 ? 'T > 1 shrinks the gaps: flatter, more random.' : 'T = 1 leaves the logits unchanged.');
   };
   slider.addEventListener('input', update);
