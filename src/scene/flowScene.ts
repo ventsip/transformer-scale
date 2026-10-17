@@ -25,6 +25,9 @@ export const RESIDUAL_COLOR = 0x67e8f9;
 export const LOOP_COLOR = 0xf8fafc;
 /** How far left of the building the generation loop runs. */
 const LOOP_MARGIN = 16384;
+/** The loop flashes this color on each decode step, fading over PULSE_MS. */
+const PULSE_COLOR = 0xfbbf24;
+const PULSE_MS = 400;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
 function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
@@ -107,6 +110,9 @@ export class FlowScene {
   private readonly dotGeometry = new THREE.SphereGeometry(1, 12, 8);
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private readonly materials = new Map<number, THREE.Material>();
+  private readonly loopMaterial = new THREE.MeshBasicMaterial({ color: LOOP_COLOR });
+  private readonly pulseColor = new THREE.Color(PULSE_COLOR);
+  private pulseStart = -Infinity;
   private edges: Edge[] = [];
   private tubes: THREE.Mesh[] = [];
   private dots?: THREE.InstancedMesh;
@@ -126,10 +132,10 @@ export class FlowScene {
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
 
-    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number) => {
+    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number, material = this.material(color)) => {
       const diameter = pipeDiameter(bytes);
       this.edges.push({ curve, diameter });
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, diameter / 2, 8), this.material(color));
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, diameter / 2, 8), material);
       this.tubes.push(tube);
       this.group.add(tube);
     };
@@ -201,7 +207,7 @@ export class FlowScene {
         a, new THREE.Vector3(a.x, top, a.z), new THREE.Vector3(left, top, a.z),
         new THREE.Vector3(left, entry, b.z), new THREE.Vector3(b.x, entry, b.z), b,
       ], false, 'centripetal');
-      draw(path, LOOP_COLOR, byteCount(from.spec));
+      draw(path, LOOP_COLOR, byteCount(from.spec), this.loopMaterial);
       label('next step: token → input_ids', new THREE.Vector3(left, (top + entry) / 2, b.z), 'op-label',
         'The sampled token id is the whole input of the next decode step: 8 bytes go around the loop, while every weight is read again.');
     }
@@ -212,8 +218,15 @@ export class FlowScene {
     this.group.add(this.dots);
   }
 
-  /** Moves the dots along the edges; `seconds` is the elapsed time. */
+  /** Flashes the generation loop: called once per decode step while generating. */
+  pulse(): void {
+    this.pulseStart = performance.now();
+  }
+
+  /** Moves the dots along the edges and fades the loop flash; `seconds` is the elapsed time. */
   tick(seconds: number): void {
+    const flash = Math.max(0, 1 - (performance.now() - this.pulseStart) / PULSE_MS);
+    this.loopMaterial.color.setHex(LOOP_COLOR).lerp(this.pulseColor, flash);
     if (!this.dots) return;
     let i = 0;
     for (const e of this.edges) {

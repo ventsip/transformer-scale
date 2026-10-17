@@ -20,6 +20,8 @@ export interface Settings {
   actDtype: DType;
   kvDtype: DType;
   floorSpacing: number;
+  /** Decode steps per second while generating. */
+  playSpeed: string;
 }
 
 export interface ControlsOptions {
@@ -29,6 +31,9 @@ export interface ControlsOptions {
   onChange: (key: keyof Settings) => void;
   onOverview: () => void;
   onFrameFocus: () => void;
+  /** Starts or stops stepping through decode, one token at a time. */
+  onPlay: () => void;
+  isPlaying: () => boolean;
 }
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: object = {}): HTMLElementTagNameMap[K] =>
@@ -85,6 +90,17 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
   }, 'T'), () => (s.mode === 'decode'
     ? `${formatInt(s.T)} in cache, +1 new`
     : `${formatInt(s.T)} in the prompt`));
+
+  const play = el('button', { className: 'play' });
+  play.addEventListener('click', () => {
+    o.onPlay();
+    refresh();
+  });
+  refreshers.push(() => (play.textContent = o.isPlaying() ? '❚❚ Pause' : '▶ Generate'));
+  const speed = select('playSpeed', [['1', '1 token/s'], ['4', '4 tokens/s'], ['16', '16 tokens/s'], ['64', '64 tokens/s']]);
+  const playRow = el('div', { className: 'buttons' });
+  playRow.append(play, speed);
+  root.append(playRow);
 
   row('Focused floor', range(0, o.floorCount - 1, 1, () => s.focusFloor, (v) => (s.focusFloor = v), 'focusFloor'),
     () => o.floorName(s.focusFloor));

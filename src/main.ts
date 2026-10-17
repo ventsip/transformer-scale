@@ -32,6 +32,7 @@ const settings: Settings = {
   actDtype: 'bf16',
   kvDtype: 'bf16',
   floorSpacing: 8000,
+  playSpeed: '4',
 };
 
 // Renderers.
@@ -202,6 +203,33 @@ const overview = (instant = false) => frame(boundsOf(placed), new THREE.Vector3(
 const frameFocus = () =>
   frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0, 1.5, 1));
 
+// Generation playback: each decode step adds one token to the cache.
+let playing = false;
+let playClock = 0;
+
+function togglePlay() {
+  playing = !playing;
+  playClock = performance.now();
+  if (playing && settings.mode !== 'decode') {
+    settings.mode = 'decode';
+    settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
+    rebuild();
+  }
+}
+
+function stepPlayback() {
+  if (!playing) return;
+  const steps = Math.floor(((performance.now() - playClock) / 1000) * Number(settings.playSpeed));
+  if (steps < 1) return;
+  playClock += (steps / Number(settings.playSpeed)) * 1000;
+  const max = maxTokens(settings, cfg.maxContext);
+  settings.T = Math.min(max, settings.T + steps);
+  if (settings.T === max) playing = false;
+  ui.refresh();
+  rebuild();
+  flow.pulse();
+}
+
 // UI.
 const panel = document.getElementById('panel')!;
 const statsEl = document.getElementById('stats')!;
@@ -219,6 +247,8 @@ const ui = createControls(document.getElementById('controls')!, settings, {
   },
   onOverview: () => overview(),
   onFrameFocus: frameFocus,
+  onPlay: togglePlay,
+  isPlaying: () => playing,
 });
 
 function describeSelection(sel: HeadSelection): string {
@@ -405,6 +435,7 @@ overview(true);
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  stepPlayback();
   flow.tick(clock.getElapsedTime());
   updateFlight();
   controls.update();

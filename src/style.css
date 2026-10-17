@@ -208,3 +208,7 @@ button:hover {
 .tt-head {
   color: #e2e8f0;
 }
+
+button.play {
+  white-space: nowrap;
+}

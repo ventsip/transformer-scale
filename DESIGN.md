@@ -74,6 +74,8 @@
   step are highlighted.
 - **The generation loop**: a white pipe from the sampled token, down the outside of the building, into input_ids.
   It carries 8 bytes, so it is the thinnest pipe in the scene: the whole output of a pass that reads every weight.
+- **Generate** steps through decode one token at a time (1 to 64 tokens/s): each step adds a row to every cache and
+  the loop flashes.
 
 ## Honesty
 
