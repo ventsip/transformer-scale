@@ -28,6 +28,10 @@ const LOOP_MARGIN = 16384;
 /** The loop flashes this color on each decode step, fading over PULSE_MS. */
 const PULSE_COLOR = 0xfbbf24;
 const PULSE_MS = 400;
+/** Tube segments: one per UNITS_PER_SEGMENT of length, within these bounds. */
+const MIN_SEGMENTS = 48;
+const MAX_SEGMENTS = 1024;
+const UNITS_PER_SEGMENT = 1000;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
 function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
@@ -135,7 +139,9 @@ export class FlowScene {
     const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number, material = this.material(color)) => {
       const diameter = pipeDiameter(bytes);
       this.edges.push({ curve, diameter });
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, diameter / 2, 8), material);
+      // Long pipes (the generation loop, risers) need more segments to stay smooth through their bends.
+      const segments = Math.min(MAX_SEGMENTS, Math.max(MIN_SEGMENTS, Math.ceil(curve.getLength() / UNITS_PER_SEGMENT)));
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, segments, diameter / 2, 8), material);
       this.tubes.push(tube);
       this.group.add(tube);
     };
