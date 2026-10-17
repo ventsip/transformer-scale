@@ -14,7 +14,7 @@ export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
 export const MASKED_COLORS = { fill: 0x64748b, edge: 0x475569 };
 
 /**
- * Which part of a box an instance covers. Score tiles split along the diagonal: keys run along X and
+ * Which part of a box an instance covers. Causal tiles split along the diagonal: keys run along X and
  * queries along Z, so the causal mask keeps the half where key ≤ query and masks the rest.
  */
 export type Part = 'box' | 'kept' | 'masked';
@@ -69,18 +69,14 @@ const OUTLINES: Record<Part, Segment[]> = {
   masked: prismOutline(TRIANGLES.masked),
 };
 
-/** Renders placed tensors: instanced solid boxes, ghost prisms for attention scores, and 1px outlines for all. */
+/** Renders placed tensors: instanced boxes, prism halves for causally masked tiles, and 1px outlines for all. */
 export class TensorScene {
   readonly group = new THREE.Group();
   private readonly unitBox = new THREE.BoxGeometry(1, 1, 1);
   private readonly prisms = { kept: prismGeometry(TRIANGLES.kept), masked: prismGeometry(TRIANGLES.masked) };
   private readonly solidMaterial = new THREE.MeshStandardMaterial({ roughness: 0.6, metalness: 0 });
-  private readonly keptMaterial = new THREE.MeshBasicMaterial({
-    transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide,
-  });
-  private readonly maskedMaterial = new THREE.MeshBasicMaterial({
-    transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide,
-  });
+  // Prism faces are wound inconsistently; drawing both sides keeps them solid from every angle.
+  private readonly prismMaterial = new THREE.MeshStandardMaterial({ roughness: 0.6, metalness: 0, side: THREE.DoubleSide });
   private readonly edgeMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
   private meshes: { mesh: THREE.InstancedMesh; picks: Pick[] }[] = [];
   private edges?: THREE.LineSegments;
@@ -110,14 +106,14 @@ export class TensorScene {
     for (const item of items) {
       item.boxes.forEach((box, i) => {
         const head = item.heads[i];
-        if (item.spec.kind !== 'scores') return solid.push({ item, box, head, part: 'box' });
+        if (!item.spec.causal) return solid.push({ item, box, head, part: 'box' });
         kept.push({ item, box, head, part: 'kept' });
         masked.push({ item, box, head, part: 'masked' });
       });
     }
     this.addInstanced(solid, this.unitBox, this.solidMaterial);
-    this.addInstanced(kept, this.prisms.kept, this.keptMaterial);
-    this.addInstanced(masked, this.prisms.masked, this.maskedMaterial);
+    this.addInstanced(kept, this.prisms.kept, this.prismMaterial);
+    this.addInstanced(masked, this.prisms.masked, this.prismMaterial);
     this.addEdges([...solid, ...kept, ...masked]);
   }
 

@@ -33,6 +33,8 @@ export interface TensorSpec {
   dtype: DType;
   note?: string;
   heads?: HeadSplit;
+  /** Square query × key tiles where the causal mask applies: the half above the diagonal is masked. */
+  causal?: boolean;
 }
 
 /**
@@ -78,12 +80,15 @@ export interface Model {
   ops: OpSpec[];
 }
 
+/** fused: FlashAttention / SDPA kernels. eager: HF eager_attention_forward, one tensor per step. */
+export type AttentionImpl = 'fused' | 'eager';
+
 export interface BuildOptions {
   T: number;
   weightDtype: DType;
   actDtype: DType;
   kvDtype: DType;
-  showScores: boolean;
+  attention: AttentionImpl;
 }
 
 const TRANSIENT = 'Transient: during inference it only exists while this layer runs.';
@@ -174,6 +179,16 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const sin = act('sin', 'sin(pos · θ): RoPE table', headDim, 'activation', ropeNote);
   op('sin(pos·θ)', [pos, invFreq], sin, 'Outer product of positions and frequencies, then sine; the 64 angles are repeated to fill head_dim.');
   next();
+  let causalMask: string | undefined;
+  if (o.attention === 'eager') {
+    causalMask = push({
+      id: 'causal_mask', label: 'causal_mask', kind: 'activation', x: T, z: T, causal: true, dtype: o.actDtype,
+      dims: [{ name: 'T (query)', size: T }, { name: 'T (key)', size: T }],
+      note: `Additive mask for eager attention: 0 where key ≤ query, −∞ above. Built once and shared by all ${cfg.nLayers} layers and heads; fused kernels only take an is_causal flag.`,
+    });
+    op('causal mask', [pos], causalMask, 'Builds the T×T additive causal mask from the positions.');
+    next();
+  }
   const embed = weight('embed_tokens.weight', vocab, dModel, 'Lookup table: each token id selects one row.');
   const ids = push({ id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int64', note: 'Token ids of the prompt.' });
   op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
@@ -217,20 +232,40 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const attnFlops = 4 * T * T * cfg.nHeads * cfg.headDim;
     const causalFlops = (attnFlops * (T + 1)) / (2 * T);
     let attn: string;
-    if (o.showScores) {
-      const scores = split(push({
-        id: 'scores', label: 'softmax(QKᵀ/√d): one T×T tile per head', kind: 'scores', x: T, z: T, tiles: cfg.nHeads,
-        dims: [{ name: 'heads', size: cfg.nHeads }, tok, tok], dtype: o.actDtype,
-        note: 'Never materialized by FlashAttention-style kernels; shown for scale. Eager attention allocates every tile in full, masked half included.',
+    if (o.attention === 'eager') {
+      // HF eager_attention_forward: every step below allocates a new tensor.
+      const perGroup = cfg.nHeads / cfg.nKvHeads;
+      const repNote = `${TRANSIENT} Each KV head copied ${perGroup}× to line up with the query heads.`;
+      const kRep = split(act('k_rep', 'repeat_kv(K)', qDim, 'activation', repNote), qHeads);
+      op('repeat_kv', [k], kRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×: GQA saves cache memory, but eager attention spends it again on temporaries.`);
+      next();
+      const vRep = split(act('v_rep', 'repeat_kv(V)', qDim, 'activation', repNote), qHeads);
+      op('repeat_kv', [v], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
+      next();
+      const scoreGrid = (id: string, label: string, dtype: DType, note: string, causal: boolean) => split(push({
+        id, label, kind: 'scores', x: T, z: T, tiles: cfg.nHeads, causal, dtype,
+        dims: [{ name: 'heads', size: cfg.nHeads }, { name: 'T (query)', size: T }, { name: 'T (key)', size: T }],
+        note: `${note} One T×T tile per head; keys run along X, queries along Z.`,
       }), qHeads, 'tiles');
-      op('softmax(QKᵀ)', [q, k], scores, 'Per head: softmax(Q Kᵀ / √d + mask). The causal mask sets entries with key > query to −∞, so they become 0.');
+      const scores = scoreGrid('scores', 'QKᵀ/√d', o.actDtype, 'Raw scores, computed in full: including the half the mask is about to discard.', false);
+      op('QKᵀ/√d', [q, kRep], scores, `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}. ${formatFlops(attnFlops / 2)} FLOPs, half of them for entries the mask discards.`);
+      next();
+      const masked = scoreGrid('scores_masked', 'QKᵀ/√d + mask', o.actDtype, 'Entries with key > query are now −∞.', true);
+      op('+ mask', [scores, causalMask!], masked, 'Adds the causal mask: 0 where key ≤ query, −∞ above the diagonal.');
+      next();
+      const probs32 = scoreGrid('probs_fp32', 'softmax(…) in fp32', 'fp32', 'Softmax runs in fp32 for stability: twice the bytes of the scores.', true);
+      op('softmax', [masked], probs32, 'Row-wise softmax over keys, upcast to fp32. Masked entries become exactly 0.');
+      next();
+      const probs = scoreGrid('probs', `softmax(…) cast to ${DTYPES[o.actDtype].label}`, o.actDtype, 'Attention probabilities cast back to the activation dtype for the · V matmul.', true);
+      op(`to ${DTYPES[o.actDtype].label}`, [probs32], probs, 'Casts the probabilities back to the activation dtype: another full copy.');
       next();
       attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
-      op('· V', [scores, v], attn, 'Per head: weighted sum of V rows.');
+      op('· V', [probs, vRep], attn, `Per head: probability-weighted sum of V rows. ${formatFlops(attnFlops / 2)} FLOPs.`);
     } else {
       attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
       op('attention', [q, k, v], attn,
-        `softmax(QKᵀ/√d)·V per head, fused (FlashAttention): the T×T scores never reach memory. Causal: query i only attends to keys 0..i, so ~${formatFlops(causalFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`);
+        'softmax(QKᵀ/√d)·V per head, fused (FlashAttention / SDPA): no repeat_kv copies, no mask tensor, and the T×T scores never reach memory. ' +
+        `Causal: query i only attends to keys 0..i, so ~${formatFlops(causalFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`);
     }
     next();
     const wo = split(weight('self_attn.o_proj.weight', qDim, dModel), qHeads);

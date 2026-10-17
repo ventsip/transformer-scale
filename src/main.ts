@@ -21,7 +21,7 @@ const settings: Settings = {
   T: 2048,
   focusFloor: 1,
   activations: 'focused',
-  showScores: false,
+  attention: 'fused',
   showFlow: true,
   thickness: 'bytes',
   weightDtype: 'bf16',
@@ -220,7 +220,7 @@ function renderStats() {
     ['KV cache per token', formatBytes(kvPerToken)],
     ['Transient activations, one layer', formatBytes(stats.layerActBytes)],
   ];
-  if (settings.showScores) rows.push(['Attention scores, one layer', `${formatBytes(stats.scoresBytes)}, ~half masked`]);
+  if (settings.attention === 'eager') rows.push(['Eager score tensors, one layer', formatBytes(stats.scoresBytes)]);
   if (selection) rows.push(['Selected head (Esc clears)', describeSelection(selection)]);
   statsEl.replaceChildren(
     ...rows.map(([k, v]) => {
@@ -239,7 +239,7 @@ document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
   swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
   swatch(KIND_COLORS.buffer.fill, 'Buffers (fixed, not learned)'),
-  swatch(KIND_COLORS.scores.fill, 'Attention scores (not stored)'),
+  swatch(KIND_COLORS.scores.fill, 'Attention scores (eager only)'),
   swatch(MASKED_COLORS.fill, 'Causally masked scores'),
 ].join('') +
   `<p>1 unit = 1 element along both floor axes. Thickness: 1 byte = ${THICKNESS_PER_BYTE} units (exaggerated).
@@ -268,8 +268,8 @@ function share(s: TensorSpec): string {
 
 function maskLine({ part }: Pick): string {
   const T = settings.T;
-  if (part === 'kept') return `<div class="tt-head">Kept by the causal mask (key ≤ query): <b>${formatCount((T * (T + 1)) / 2)}</b> entries per head</div>`;
-  if (part === 'masked') return `<div class="tt-head">Causally masked (key > query): <b>${formatCount((T * (T - 1)) / 2)}</b> entries per head, −∞ before softmax, 0 after</div>`;
+  if (part === 'kept') return `<div class="tt-head">Kept by the causal mask (key ≤ query): <b>${formatCount((T * (T + 1)) / 2)}</b> entries per T×T tile</div>`;
+  if (part === 'masked') return `<div class="tt-head">Causally masked (key > query): <b>${formatCount((T * (T - 1)) / 2)}</b> entries per T×T tile: −∞ before softmax, 0 after</div>`;
   return '';
 }
 

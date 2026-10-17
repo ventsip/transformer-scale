@@ -1,12 +1,13 @@
 import type { ThicknessMode } from '../layout';
 import type { DType } from '../model/dtypes';
+import type { AttentionImpl } from '../model/tensors';
 import { formatInt } from '../format';
 
 export interface Settings {
   T: number;
   focusFloor: number;
   activations: 'focused' | 'all';
-  showScores: boolean;
+  attention: AttentionImpl;
   showFlow: boolean;
   thickness: ThicknessMode;
   weightDtype: DType;
@@ -77,7 +78,7 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
 
   row('Transient activations', select('activations', [['focused', 'Focused floor only (inference)'], ['all', 'Every floor']]));
 
-  const checkbox = (key: 'showScores' | 'showFlow', text: string) => {
+  const checkbox = (key: 'showFlow', text: string) => {
     const input = el('input', { type: 'checkbox' });
     refreshers.push(() => (input.checked = s[key]));
     input.addEventListener('change', () => {
@@ -89,7 +90,7 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
     root.append(wrap);
   };
   checkbox('showFlow', 'Show data flow on the focused floor');
-  checkbox('showScores', 'Show materialized attention scores');
+  row('Attention', select('attention', [['fused', 'Fused (FlashAttention / SDPA)'], ['eager', 'Eager (one tensor per step)']]));
 
   row('Thickness', select('thickness', [['bytes', 'Bytes per element'], ['elements', 'Uniform (elements only)']]));
   row('Weights dtype', select('weightDtype', [['bf16', 'bf16'], ['fp8', 'fp8'], ['int4', 'int4'], ['fp32', 'fp32']]));
