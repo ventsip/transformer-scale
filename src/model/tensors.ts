@@ -46,8 +46,8 @@ export interface TensorSpec {
   rowGap?: number;
   /** Place to the right of the previous tensor in its row instead of in front of it. */
   beside?: boolean;
-  /** Float this far above the previous tensor in its row, centered on the station; its op sits below it. */
-  above?: number;
+  /** When stacked in its row, center it on the station instead of aligning it left. */
+  centered?: boolean;
   /** Part of the residual stream: the edges that carry it are drawn bold. */
   residual?: boolean;
 }
@@ -492,7 +492,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const probs = strip('probs', 'probabilities', `softmax over the vocabulary: ${cfg.vocabSize.toLocaleString('en-US')} probabilities summing to 1, mostly exactly 0 after filtering.`);
   op('softmax', [filtered], probs, 'Softmax over the vocabulary.');
   const nextToken = push({
-    id: 'next_token', label: 'next token id', kind: 'activation', x: 1, z: 1, above: 6000,
+    id: 'next_token', label: 'next token id', kind: 'activation', x: 1, z: 1, rowGap: SAMPLING_GAP, centered: true,
     dims: [{ name: 'token', size: 1 }], dtype: 'int64',
     note: 'The output of the whole forward pass: one token id, 8 bytes. In decoding it becomes the next input_ids.',
   });

@@ -13,8 +13,6 @@ const ROW_GAP = 1024;
 const ITEM_GAP = 512;
 /** Gap between a tensor and one placed beside it. */
 const BESIDE_GAP = 2048;
-/** Sideways offset from the station middle for a tensor floating above another. */
-const ABOVE_SHIFT = 6144;
 const SECTION_GAP = 3072;
 const TILE_COLS = 8;
 export const THICKNESS_PER_BYTE = 64;
@@ -90,24 +88,17 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
         let front = ROW_GAP / 2;
         let width = 0;
         let stackedFront = false;
-        // The previous front-row tensor, for one placed beside or above it.
-        let last = { zMin: 0, depth: 0, xEnd: 0 };
+        // The previous front-row tensor, for one placed beside it.
+        let last = { zMin: 0, xEnd: 0 };
         const stationWidth = Math.max(...items.map((s) => tiling(s).width));
         for (const s of items) {
           const t = tiling(s);
           const h = thickness(s, o.thickness);
           let zMin: number;
           let xOffset = 0;
-          let lift = 0;
           if (s.kind === 'weight') {
             zMin = -(back + t.depth);
             back += t.depth + ITEM_GAP;
-          } else if (s.above !== undefined && stackedFront) {
-            // Floating over the previous tensor, just right of the station's middle: the op that produced the previous
-            // tensor hovers over its center, and this tensor's op sits below it, so the two stay apart.
-            zMin = last.zMin + (last.depth - t.depth) / 2;
-            xOffset = stationWidth / 2 + ABOVE_SHIFT;
-            lift = s.above;
           } else if (s.beside && stackedFront) {
             // Same row as the previous tensor, to its right.
             zMin = last.zMin;
@@ -118,8 +109,10 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
             zMin = front + gap;
             front = zMin + t.depth;
             stackedFront = true;
+            // Centered tensors line up under the middle of the station (and so do the ops hovering over them).
+            if (s.centered) xOffset = (stationWidth - t.width) / 2;
           }
-          if (s.kind !== 'weight' && s.above === undefined) last = { zMin, depth: t.depth, xEnd: xOffset + t.width };
+          if (s.kind !== 'weight') last = { zMin, xEnd: xOffset + t.width };
           width = Math.max(width, xOffset + t.width);
           minZ = Math.min(minZ, zMin);
           maxZ = Math.max(maxZ, zMin + t.depth);
@@ -130,7 +123,7 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
             const tileZ = zMin + Math.floor(i / t.cols) * (s.z + t.gap);
             const split = s.heads && s.heads.axis !== 'tiles' ? s.heads : null;
             if (!split) {
-              boxes.push({ cx: minX + s.x / 2, cy: y + lift + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
+              boxes.push({ cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
               heads.push(s.heads?.axis === 'tiles' ? i : null);
               continue;
             }
@@ -140,7 +133,7 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
             for (let hd = 0; hd < split.count; hd++) {
               const ox = split.axis === 'x' ? hd * bx : 0;
               const oz = split.axis === 'z' ? hd * bz : 0;
-              boxes.push({ cx: minX + ox + bx / 2, cy: y + lift + h / 2, cz: tileZ + oz + bz / 2, sx: bx, sy: h, sz: bz });
+              boxes.push({ cx: minX + ox + bx / 2, cy: y + h / 2, cz: tileZ + oz + bz / 2, sx: bx, sy: h, sz: bz });
               heads.push(hd);
             }
           }

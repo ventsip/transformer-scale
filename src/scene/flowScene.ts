@@ -59,9 +59,7 @@ function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'botto
 /** Hovering over the center of its output; when the output is on a higher floor, just below it instead. */
 function opPosition(op: OpSpec, out: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
   const b = bounds(out, sel);
-  // Below outputs on a higher floor and outputs floating above their floor (the sampled token).
-  const below = out.spec.floor !== op.floor || out.spec.above !== undefined;
-  const y = below ? b.base - OP_HOVER : b.top + OP_HOVER;
+  const y = out.spec.floor === op.floor ? b.top + OP_HOVER : b.base - OP_HOVER;
   return new THREE.Vector3((b.minX + b.maxX) / 2, y, (b.minZ + b.maxZ) / 2);
 }
 
@@ -188,7 +186,6 @@ export class FlowScene {
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
       const pos = opPosition(op, out, sel);
       const crossFloor = out.spec.floor !== op.floor;
-      const fromBelow = crossFloor || out.spec.above !== undefined;
       // The residual stream (into an op that produces it, and out of it) gets its own color.
       // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) keep their kind's color.
       const carriesStream = !!out.spec.residual;
@@ -200,8 +197,8 @@ export class FlowScene {
         else arc(anchor(p!, sel), pos, color, bytes);
       }
       const outColor = carriesStream ? RESIDUAL_COLOR : KIND_COLORS[out.spec.kind].edge;
-      // The op sits right above its output (or right below it, across floors or under a lifted output): a straight line into it.
-      draw(new THREE.LineCurve3(pos, anchor(out, sel, fromBelow ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
+      // The op sits right above its output (or right below it, across floors): a straight line into it.
+      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       const div = label(text, pos, 'op-label', op.note);
       if (hasViz(op)) {
