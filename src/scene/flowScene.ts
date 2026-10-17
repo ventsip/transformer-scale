@@ -9,7 +9,8 @@ const OP_LIFT = 400;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
-const DOT_RADIUS = 220;
+/** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
+const DOT_SCALE = 0.0035;
 
 function bounds(p: PlacedTensor) {
   const b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, base: Infinity, top: -Infinity };
@@ -128,18 +129,18 @@ export class FlowScene {
     this.dots = new THREE.InstancedMesh(this.dotGeometry, this.dotMaterial, this.curves.length * DOTS_PER_EDGE);
     this.dots.frustumCulled = false;
     this.group.add(this.dots);
-    this.tick(0);
   }
 
   /** Moves the dots along their edges; `seconds` is the elapsed time. */
-  tick(seconds: number): void {
+  tick(seconds: number, camera: THREE.Camera): void {
     if (!this.dots) return;
     let i = 0;
     for (const curve of this.curves) {
       for (let d = 0; d < DOTS_PER_EDGE; d++) {
         const t = (seconds / PERIOD + d / DOTS_PER_EDGE) % 1;
         curve.getPoint(t, this.point);
-        this.matrix.makeScale(DOT_RADIUS, DOT_RADIUS, DOT_RADIUS).setPosition(this.point);
+        const r = this.point.distanceTo(camera.position) * DOT_SCALE;
+        this.matrix.makeScale(r, r, r).setPosition(this.point);
         this.dots.setMatrixAt(i++, this.matrix);
       }
     }

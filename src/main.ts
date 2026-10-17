@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { formatBytes, formatCount, formatInt } from './format';
-import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type PlacedTensor } from './layout';
+import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { LLAMA_3_8B } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
@@ -51,6 +51,7 @@ const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerH
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.zoomToCursor = true;
+controls.zoomSpeed = 4;
 controls.maxDistance = 5e6;
 
 const tensors = new TensorScene();
@@ -121,7 +122,7 @@ function updateProjection() {
 }
 
 /** Places the camera along `dir` from the box center, at the distance where every corner fits the visible area. */
-function frame(box: THREE.Box3, dir: THREE.Vector3) {
+function frame(box: THREE.Box3, dir: THREE.Vector3, instant = false) {
   const center = box.getCenter(new THREE.Vector3());
   const back = dir.clone().normalize();
   const right = new THREE.Vector3(0, 1, 0).cross(back).normalize();
@@ -135,12 +136,49 @@ function frame(box: THREE.Box3, dir: THREE.Vector3) {
     const z = corner.dot(back);
     dist = Math.max(dist, Math.abs(corner.dot(right)) / tanH + z, Math.abs(corner.dot(up)) / tanV + z);
   }
-  controls.target.copy(center);
-  camera.position.copy(center).addScaledVector(back, dist * 1.05);
-  controls.update();
+  flyTo(center.clone().addScaledVector(back, dist * 1.05), center, instant);
 }
 
-const overview = () => frame(boundsOf(placed), new THREE.Vector3(0.45, 0.35, 1));
+// Camera flights: eased interpolation of position and orbit target; any user input cancels them.
+const FLIGHT_SECONDS = 0.8;
+let flight: { from: THREE.Vector3; fromTarget: THREE.Vector3; to: THREE.Vector3; toTarget: THREE.Vector3; start: number } | null = null;
+
+function flyTo(position: THREE.Vector3, target: THREE.Vector3, instant = false) {
+  if (instant) {
+    flight = null;
+    camera.position.copy(position);
+    controls.target.copy(target);
+    return;
+  }
+  flight = {
+    from: camera.position.clone(), fromTarget: controls.target.clone(),
+    to: position, toTarget: target, start: performance.now(),
+  };
+}
+
+function updateFlight() {
+  if (!flight) return;
+  const t = Math.min(1, (performance.now() - flight.start) / (FLIGHT_SECONDS * 1000));
+  const e = t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
+  camera.position.lerpVectors(flight.from, flight.to, e);
+  controls.target.lerpVectors(flight.fromTarget, flight.toTarget, e);
+  if (t === 1) flight = null;
+}
+
+controls.addEventListener('start', () => (flight = null));
+
+/** Frames a single box from the current viewing direction, kept at least slightly above the floor. */
+function frameBox(b: Box) {
+  const box = new THREE.Box3(
+    new THREE.Vector3(b.cx - b.sx / 2, b.cy - b.sy / 2, b.cz - b.sz / 2),
+    new THREE.Vector3(b.cx + b.sx / 2, b.cy + b.sy / 2, b.cz + b.sz / 2),
+  );
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  if (dir.y < 0.35) dir.setY(0.35).normalize();
+  frame(box, dir);
+}
+
+const overview = (instant = false) => frame(boundsOf(placed), new THREE.Vector3(0.45, 0.35, 1), instant);
 // Front and above: the focus gap keeps the floors overhead out of the line of sight.
 const frameFocus = () =>
   frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0, 1.5, 1));
@@ -153,7 +191,7 @@ const ui = createControls(document.getElementById('controls')!, settings, {
   floorCount: FLOORS,
   floorName: (f) => floorName(cfg, f),
   onChange: rebuild,
-  onOverview: overview,
+  onOverview: () => overview(),
   onFrameFocus: frameFocus,
 });
 
@@ -235,16 +273,24 @@ renderer.domElement.addEventListener('pointerleave', () => {
   tooltip.hidden = true;
 });
 
+// Click focuses a floor; double-click also flies to the element. The first click of a double-click
+// may change the focus and move floors, so the double-click reuses that click's pick by id.
 let downAt: { x: number; y: number } | null = null;
+let lastClick: { id: string; tile: number } | null = null;
 renderer.domElement.addEventListener('pointerdown', (e) => (downAt = { x: e.clientX, y: e.clientY }));
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
   const p = pickAt(e);
+  if (e.detail <= 1) lastClick = p ? { id: p.item.spec.id, tile: p.item.boxes.indexOf(p.box) } : null;
   if (p && p.item.spec.floor !== settings.focusFloor) {
     settings.focusFloor = p.item.spec.floor;
     ui.refresh();
     rebuild();
   }
+});
+renderer.domElement.addEventListener('dblclick', () => {
+  const item = lastClick && placed.find((p) => p.spec.id === lastClick!.id);
+  if (item) frameBox(item.boxes[lastClick!.tile] ?? item.boxes[0]);
 });
 
 window.addEventListener('keydown', (e) => {
@@ -265,11 +311,12 @@ panel.hidden = false;
 updateProjection();
 
 rebuild();
-overview();
+overview(true);
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  flow.tick(clock.getElapsedTime());
+  flow.tick(clock.getElapsedTime(), camera);
+  updateFlight();
   controls.update();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
