@@ -4,8 +4,8 @@ import { STATION_GAP, type PlacedTensor } from '../layout';
 import { onPath, type HeadSelection, type OpSpec } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 
-/** Height of operation nodes above the floor. */
-const OP_LIFT = 400;
+/** Height of operation nodes above the floor: they hover over the tensor they produce. */
+const OP_HOVER = 2500;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
@@ -40,14 +40,14 @@ function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'botto
   return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
 }
 
-/** On the bus right behind the output; beside the first input when the output is on another floor. */
+/** Hovering over the center of its output; beside its first input when the output is on another floor. */
 function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
   if (out.spec.floor === op.floor) {
     const b = bounds(out, sel);
-    return new THREE.Vector3(out.opX ?? (b.minX + b.maxX) / 2, b.base + OP_LIFT, out.opZ);
+    return new THREE.Vector3((b.minX + b.maxX) / 2, b.top + OP_HOVER, (b.minZ + b.maxZ) / 2);
   }
   const b = bounds(first);
-  return new THREE.Vector3(b.maxX + STATION_GAP / 2, b.base + OP_LIFT, first.busZ);
+  return new THREE.Vector3(b.maxX + STATION_GAP / 2, b.top + OP_HOVER, first.busZ);
 }
 
 /**
@@ -155,7 +155,8 @@ export class FlowScene {
         else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
       }
       const outColor = KIND_COLORS[out.spec.kind].edge;
-      if (out.spec.floor === op.floor) arc(pos, anchor(out, sel), outColor, carriesStream);
+      // The op hovers right above its output: a straight drop into it.
+      if (out.spec.floor === op.floor) draw(new THREE.LineCurve3(pos, anchor(out, sel)), outColor, carriesStream);
       else riser(pos, anchor(out, sel, 'bottom'), outColor, carriesStream);
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);

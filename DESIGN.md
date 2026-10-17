@@ -21,11 +21,13 @@
 ## Data flow
 
 - **Operations** (`@`, RMSNorm, `+`, attention, SiLU ⊙, lookup) have no parameters, so they get no world size:
-  they are screen-space labels on the bus, right behind the tensor they produce. Hover for shapes and FLOPs.
-- **Edges** arc from each input to the operation and from the operation to its output, colored by the tensor
+  they are screen-space labels hovering above the center of the tensor they produce. Hover for shapes and FLOPs.
+- **Edges** arc from each input up into the operation and drop straight into its output, colored by the tensor
   kind they carry; moving dots show direction.
-- Flow is drawn for the focused floor only. Data leaving or entering the floor ends in a short labelled stub
-  ("→ Layer 1", "from Embedding") rather than an arc across floors.
+- **The residual stream** (x, h and the adds between them) is drawn as bold cyan tubes; reads that branch off it
+  and branch outputs joining it stay thin.
+- Flow is drawn for the focused floor, plus the op on the floor below that produces its input. Edges between
+  floors are risers: they leave heading up and enter the upper block from below.
 
 ## Attention heads
 

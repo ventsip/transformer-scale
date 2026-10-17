@@ -22,6 +22,8 @@ body,
 .labels {
   position: absolute;
   inset: 0;
+  /* CSS2DRenderer gives each label a z-index; this keeps them all below the panel and tooltip. */
+  z-index: 0;
   pointer-events: none;
 }
 
@@ -39,6 +41,7 @@ body,
 
 #panel {
   position: fixed;
+  z-index: 1;
   top: 12px;
   right: 12px;
   width: 300px;
@@ -157,6 +160,7 @@ button:hover {
 
 #tooltip {
   position: fixed;
+  z-index: 2;
   top: 0;
   left: 0;
   max-width: 340px;

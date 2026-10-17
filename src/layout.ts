@@ -11,7 +11,7 @@ import type { TensorSpec } from './model/tensors';
 export const STATION_GAP = 2048;
 const ROW_GAP = 1024;
 const ITEM_GAP = 512;
-/** Gap between a tensor and one placed beside it, with room for the op between them. */
+/** Gap between a tensor and one placed beside it. */
 const BESIDE_GAP = 2048;
 const SECTION_GAP = 3072;
 const TILE_COLS = 8;
@@ -46,10 +46,6 @@ export interface PlacedTensor {
   reserved: boolean[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
-  /** Z where the op producing this tensor sits: the bus, or the gap before it when stacked in its row. */
-  opZ: number;
-  /** X of that op, when not centered on the tensor (tensors placed beside another). */
-  opX?: number;
 }
 
 function tiling(s: TensorSpec) {
@@ -96,23 +92,17 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
           const h = thickness(s, o.thickness);
           let zMin: number;
           let xOffset = 0;
-          // The op producing a front-row tensor sits in the gap before it: on the bus for the first one.
-          let opZ = 0;
-          let opX: number | undefined;
           if (s.kind === 'weight') {
             zMin = -(back + t.depth);
             back += t.depth + ITEM_GAP;
           } else if (s.beside && stackedFront) {
-            // Same row as the previous tensor, to its right; the op sits in the gap between them.
+            // Same row as the previous tensor, to its right.
             zMin = last.zMin;
             xOffset = last.xEnd + BESIDE_GAP;
-            opX = x0 + last.xEnd + BESIDE_GAP / 2;
-            opZ = zMin + t.depth / 2;
             front = Math.max(front, zMin + t.depth);
           } else {
             const gap = stackedFront ? (s.rowGap ?? ITEM_GAP) : 0;
             zMin = front + gap;
-            if (stackedFront) opZ = zMin - gap / 2;
             front = zMin + t.depth;
             stackedFront = true;
           }
@@ -154,14 +144,13 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
               reserved.splice(i, 1, false, true);
             }
           }
-          local.push({ spec: s, boxes, heads, reserved, busZ: 0, opZ, opX });
+          local.push({ spec: s, boxes, heads, reserved, busZ: 0 });
         }
         x0 += width + STATION_GAP;
       }
       const shift = section === 0 ? 0 : behind - SECTION_GAP - maxZ;
       for (const p of local) {
         p.busZ = shift;
-        p.opZ += shift;
         for (const b of p.boxes) b.cz += shift;
       }
       behind = shift + minZ;
