@@ -10,7 +10,7 @@ const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
 /** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
-const DOT_SCALE = 0.0035;
+const DOT_SCALE = 0.0015;
 
 function bounds(p: PlacedTensor) {
   const b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, base: Infinity, top: -Infinity };
@@ -25,10 +25,10 @@ function bounds(p: PlacedTensor) {
   return b;
 }
 
-/** Where edges attach to a tensor: the middle of the edge that faces its section's bus. */
+/** Where edges attach to a tensor: the center of its top face (all tiles together). */
 function anchor(p: PlacedTensor): THREE.Vector3 {
   const b = bounds(p);
-  return new THREE.Vector3((b.minX + b.maxX) / 2, b.top, p.spec.kind === 'weight' ? b.maxZ : b.minZ);
+  return new THREE.Vector3((b.minX + b.maxX) / 2, b.top, (b.minZ + b.maxZ) / 2);
 }
 
 /** On the bus right behind the output; beside the first input when the output is on another floor. */
