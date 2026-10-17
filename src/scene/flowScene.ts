@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { PlacedTensor } from '../layout';
-import { onPath, type HeadSelection, type OpSpec } from '../model/tensors';
+import { byteCount, onPath, type HeadSelection, type OpSpec } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 
 /** Height of operation nodes above the floor: they hover over the tensor they produce. */
@@ -9,10 +9,11 @@ const OP_HOVER = 2500;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
-/** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
-const DOT_SCALE = 0.0015;
-/** Radius of residual-stream tubes as a fraction of their distance to the camera: a steady width on screen. */
-const TUBE_SCALE = 0.0025;
+/** Smallest radius of a flow dot, in screen pixels. */
+const DOT_MIN_PX = 1.5;
+/** Edge width: 1 px at 8 KiB, plus this much per doubling of bytes, up to MAX_WIDTH_PX. */
+export const PX_PER_DOUBLING = 0.36;
+const MAX_WIDTH_PX = 9;
 /** Color of the residual stream: distinct from every tensor kind. */
 export const RESIDUAL_COLOR = 0x67e8f9;
 /** Rebuild tubes when the camera distance has changed by more than this factor since they were built. */
@@ -63,16 +64,46 @@ export function linkedTensors(ops: OpSpec[], floorOf: (id: string) => number, fo
   return ids;
 }
 
-/** Draws operations of the focused floor as labels, with arcs from inputs to op to output and dots moving along them. */
+/** Bytes an edge carries from tensor `p`: the op's override, else the tensor, else with a head selected its share. */
+function flowBytes(p: PlacedTensor, sel: HeadSelection | null, override?: number): number {
+  if (override !== undefined) return override;
+  const total = byteCount(p.spec);
+  const split = p.spec.heads;
+  if (!sel || !split) return total;
+  let on = 0;
+  let all = 0;
+  p.boxes.forEach((b, i) => {
+    const area = b.sx * b.sz;
+    all += area;
+    if (onPath(split, p.heads[i]!, sel)) on += area;
+  });
+  return (total * on) / all;
+}
+
+/** On-screen width in pixels of an edge carrying `bytes`: logarithmic, 1 px at 8 KiB. */
+export function edgeWidthPx(bytes: number): number {
+  return Math.min(MAX_WIDTH_PX, Math.max(1, 1 + (Math.log2(Math.max(bytes, 1)) - 13) * PX_PER_DOUBLING));
+}
+
+interface Edge {
+  curve: THREE.Curve<THREE.Vector3>;
+  mid: THREE.Vector3;
+  color: number;
+  widthPx: number;
+  tube?: THREE.Mesh;
+  builtAt: number;
+}
+
+/**
+ * Draws operations of the focused floor as labels, with tubes from inputs to op to output whose width
+ * grows with the log of the bytes they carry, and dots moving along them.
+ */
 export class FlowScene {
   readonly group = new THREE.Group();
-  private readonly lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
   private readonly dotGeometry = new THREE.SphereGeometry(1, 12, 8);
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  private curves: THREE.Curve<THREE.Vector3>[] = [];
-  private lines?: THREE.LineSegments;
-  /** Edges that carry the residual stream, drawn as tubes sized for the camera distance they were built at. */
-  private bold: { curve: THREE.Curve<THREE.Vector3>; mid: THREE.Vector3; material: THREE.Material; tube?: THREE.Mesh; builtAt: number }[] = [];
+  private readonly materials = new Map<number, THREE.Material>();
+  private edges: Edge[] = [];
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
   private readonly matrix = new THREE.Matrix4();
@@ -88,35 +119,21 @@ export class FlowScene {
     this.clear();
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
-    const positions: number[] = [];
-    const colors: number[] = [];
-    const color = new THREE.Color();
 
-    const draw = (curve: THREE.Curve<THREE.Vector3>, hex: number, bold: boolean) => {
-      this.curves.push(curve);
-      if (bold) {
-        this.bold.push({ curve, mid: curve.getPoint(0.5), material: new THREE.MeshBasicMaterial({ color: RESIDUAL_COLOR }), builtAt: 0 });
-        return;
-      }
-      const pts = curve.getPoints(32);
-      color.setHex(hex);
-      for (let i = 0; i < pts.length - 1; i++) {
-        positions.push(pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
-        colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
-      }
-    };
+    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number) =>
+      this.edges.push({ curve, mid: curve.getPoint(0.5), color, widthPx: edgeWidthPx(bytes), builtAt: 0 });
 
     /** Within a floor: an arc lifted in proportion to its length. */
-    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number, bold = false) => {
+    const arc = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
       const mid = a.clone().add(b).multiplyScalar(0.5);
       mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
-      draw(new THREE.QuadraticBezierCurve3(a, mid, b), hex, bold);
+      draw(new THREE.QuadraticBezierCurve3(a, mid, b), color, bytes);
     };
 
     /** Between floors: leaves `a` heading straight up and enters `b` from below, heading up. */
-    const riser = (a: THREE.Vector3, b: THREE.Vector3, hex: number, bold = false) => {
+    const riser = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
       const lift = Math.max((b.y - a.y) / 2, 2000);
-      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), hex, bold);
+      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), color, bytes);
     };
 
     const label = (text: string, pos: THREE.Vector3, className: string, title = '') => {
@@ -135,7 +152,6 @@ export class FlowScene {
     };
 
     // Ops on the focused floor, plus the op on another floor that produces this floor's input.
-    // Ops whose output is on another floor link to that block directly, with a low arc.
     for (const op of ops) {
       const out = byId.get(op.output);
       const inputs = op.inputs.map((id) => byId.get(id));
@@ -143,54 +159,52 @@ export class FlowScene {
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
       const pos = opPosition(op, out, sel);
       const crossFloor = out.spec.floor !== op.floor;
-      // Bold: edges that carry the residual stream (into an op that produces it, and out of it).
-      // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) stay thin.
+      // The residual stream (into an op that produces it, and out of it) gets its own color.
+      // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) keep their kind's color.
       const carriesStream = !!out.spec.residual;
       for (const p of inputs) {
-        const bold = carriesStream && !!p!.spec.residual;
+        const color = carriesStream && p!.spec.residual ? RESIDUAL_COLOR : KIND_COLORS[p!.spec.kind].edge;
+        const bytes = flowBytes(p!, sel, op.inputBytes?.[p!.spec.id]);
         // Inputs from a lower floor (RoPE tables), and inputs of an op that sits under a higher floor, rise into it.
-        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
-        else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
+        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, color, bytes);
+        else arc(anchor(p!, sel), pos, color, bytes);
       }
-      const outColor = KIND_COLORS[out.spec.kind].edge;
+      const outColor = carriesStream ? RESIDUAL_COLOR : KIND_COLORS[out.spec.kind].edge;
       // The op sits right above its output (or right below it, across floors): a straight line into it.
-      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, carriesStream);
+      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
     }
 
-    if (this.curves.length === 0) return;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    this.lines = new THREE.LineSegments(geometry, this.lineMaterial);
-    this.group.add(this.lines);
-
-    this.dots = new THREE.InstancedMesh(this.dotGeometry, this.dotMaterial, this.curves.length * DOTS_PER_EDGE);
+    if (this.edges.length === 0) return;
+    this.dots = new THREE.InstancedMesh(this.dotGeometry, this.dotMaterial, this.edges.length * DOTS_PER_EDGE);
     this.dots.frustumCulled = false;
     this.group.add(this.dots);
   }
 
-  /** Moves the dots along their edges; `seconds` is the elapsed time. */
-  tick(seconds: number, camera: THREE.Camera): void {
-    for (const b of this.bold) {
-      const dist = b.mid.distanceTo(camera.position);
-      if (b.tube && dist < b.builtAt * TUBE_REBUILD && dist > b.builtAt / TUBE_REBUILD) continue;
-      if (b.tube) {
-        this.group.remove(b.tube);
-        b.tube.geometry.dispose();
+  /** Keeps tubes at their pixel widths for the current camera distance and moves the dots along the edges. */
+  tick(seconds: number, camera: THREE.PerspectiveCamera): void {
+    // World size of one screen pixel per unit of distance from the camera.
+    const pxPerDist = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / window.innerHeight;
+    for (const e of this.edges) {
+      const dist = e.mid.distanceTo(camera.position);
+      if (e.tube && dist < e.builtAt * TUBE_REBUILD && dist > e.builtAt / TUBE_REBUILD) continue;
+      if (e.tube) {
+        this.group.remove(e.tube);
+        e.tube.geometry.dispose();
       }
-      b.tube = new THREE.Mesh(new THREE.TubeGeometry(b.curve, 48, dist * TUBE_SCALE, 6), b.material);
-      b.builtAt = dist;
-      this.group.add(b.tube);
+      const radius = (dist * pxPerDist * e.widthPx) / 2;
+      e.tube = new THREE.Mesh(new THREE.TubeGeometry(e.curve, 48, radius, 6), this.material(e.color));
+      e.builtAt = dist;
+      this.group.add(e.tube);
     }
     if (!this.dots) return;
     let i = 0;
-    for (const curve of this.curves) {
+    for (const e of this.edges) {
       for (let d = 0; d < DOTS_PER_EDGE; d++) {
         const t = (seconds / PERIOD + d / DOTS_PER_EDGE) % 1;
-        curve.getPoint(t, this.point);
-        const r = this.point.distanceTo(camera.position) * DOT_SCALE;
+        e.curve.getPoint(t, this.point);
+        const r = this.point.distanceTo(camera.position) * pxPerDist * Math.max(DOT_MIN_PX, e.widthPx * 0.6);
         this.matrix.makeScale(r, r, r).setPosition(this.point);
         this.dots.setMatrixAt(i++, this.matrix);
       }
@@ -198,23 +212,21 @@ export class FlowScene {
     this.dots.instanceMatrix.needsUpdate = true;
   }
 
+  private material(color: number): THREE.Material {
+    let m = this.materials.get(color);
+    if (!m) this.materials.set(color, (m = new THREE.MeshBasicMaterial({ color })));
+    return m;
+  }
+
   private clear(): void {
     for (const label of this.labels) this.group.remove(label);
     this.labels = [];
-    this.curves = [];
-    for (const b of this.bold) {
-      if (b.tube) {
-        this.group.remove(b.tube);
-        b.tube.geometry.dispose();
-      }
-      b.material.dispose();
+    for (const e of this.edges) {
+      if (!e.tube) continue;
+      this.group.remove(e.tube);
+      e.tube.geometry.dispose();
     }
-    this.bold = [];
-    if (this.lines) {
-      this.group.remove(this.lines);
-      this.lines.geometry.dispose();
-      this.lines = undefined;
-    }
+    this.edges = [];
     if (this.dots) {
       this.group.remove(this.dots);
       this.dots.dispose();

@@ -81,6 +81,8 @@ export interface OpSpec {
   inputs: string[];
   output: string;
   note: string;
+  /** Bytes actually read from an input, when that is less than the whole tensor (by input id). */
+  inputBytes?: Record<string, number>;
 }
 
 export interface Model {
@@ -216,6 +218,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const embed = weight('embed_tokens.weight', vocab, dModel, 'Lookup table: each token id selects one row.');
   const ids = push({ id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int64', note: 'Token ids of the prompt.' });
   op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
+  // The lookup reads only the T rows it selects, not the whole table.
+  ops[ops.length - 1].inputBytes = { [embed]: T * cfg.dModel * DTYPES[o.weightDtype].bytes };
   /** An activation stacked behind the previous one in its station's front row, with room for its op. */
   const stacked = (id: string, label: string, feat: Dim, dtype: DType, note: string) =>
     push({ id, label, kind: 'activation', x: feat.size, z: T, rowGap: STACK_GAP, dims: [tok, feat], dtype, note });

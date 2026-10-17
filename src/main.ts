@@ -10,7 +10,7 @@ import {
   buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
-import { FlowScene, RESIDUAL_COLOR, linkedTensors } from './scene/flowScene';
+import { FlowScene, RESIDUAL_COLOR, edgeWidthPx, linkedTensors } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
 
@@ -238,6 +238,9 @@ function renderStats() {
   );
 }
 
+const widthExamples = ([['8 KiB', 2 ** 13], ['16 MiB', 2 ** 24], ['1 GiB', 2 ** 30]] as const)
+  .map(([name, bytes]) => `${name} ≈ ${edgeWidthPx(bytes).toFixed(0)} px`)
+  .join(', ');
 const swatch = (hex: number, label: string) =>
   `<span><i style="background:#${hex.toString(16).padStart(6, '0')}"></i>${label}</span>`;
 document.getElementById('legend')!.innerHTML = [
@@ -250,7 +253,8 @@ document.getElementById('legend')!.innerHTML = [
   swatch(MASKED_COLORS.fill, 'Causally masked scores'),
 ].join('') +
   `<p>1 unit = 1 element along both floor axes. Thickness: 1 byte = ${THICKNESS_PER_BYTE} units (exaggerated).
-  Weights: input dim → X, output dim → Z. Activations: features → X, tokens → Z.</p>`;
+  Weights: input dim → X, output dim → Z. Activations: features → X, tokens → Z.
+  Flow line width grows with the log of the bytes carried: ${widthExamples}.</p>`;
 
 // Hover and click.
 const tooltip = document.getElementById('tooltip')!;
