@@ -63,6 +63,7 @@
 ## Scope
 
 - Model: Llama-3-8B (`src/model/config.ts`); everything is derived from the config.
-- Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only.
+- Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then
+  sampled as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
 - Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
   parameters and are not drawn as objects.

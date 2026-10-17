@@ -35,6 +35,8 @@ export interface TensorSpec {
   heads?: HeadSplit;
   /** Square query × key tiles where the causal mask applies: the half above the diagonal is masked. */
   causal?: boolean;
+  /** Space before this tensor when it is stacked behind another in the same row (default: a small gap). */
+  rowGap?: number;
 }
 
 /**
@@ -318,6 +320,29 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   });
   op('@', [xNorm, head], logits,
     `Matrix multiply, last position only: [1 × ${cfg.dModel}] @ [${cfg.dModel} × ${cfg.vocabSize}]. ${formatFlops(2 * cfg.dModel * cfg.vocabSize)} FLOPs.`);
+
+  // Sampling (HF generate): vocab-wide strips stacked in front of the logits, spaced so their ops have room.
+  const SAMPLING_GAP = 4096;
+  const strip = (id: string, label: string, note: string) => push({
+    id, label, kind: 'activation', x: cfg.vocabSize, z: 1, rowGap: SAMPLING_GAP,
+    dims: [{ name: 'last token', size: 1 }, vocab], dtype: 'fp32', note,
+  });
+  const logits32 = strip('logits_fp32', 'logits in fp32', 'generate() copies the last logits to fp32 before any processing.');
+  op('to fp32', [logits], logits32, 'Upcast copy of the last position\'s logits.');
+  const scaled = strip('scaled', 'logits / temperature', 'Temperature < 1 sharpens the distribution, > 1 flattens it.');
+  op('÷ temperature', [logits32], scaled, 'Divides every logit by the temperature.');
+  const filtered = strip('filtered', 'after top-k / top-p', 'Tokens outside the kept set are −∞.');
+  op('top-k / top-p', [scaled], filtered,
+    `Keeps the k most likely tokens, then the smallest set whose probability reaches p; the rest become −∞. ` +
+    `Top-p sorts all ${cfg.vocabSize.toLocaleString('en-US')} logits, allocating sorted values and int64 indices as further temporaries.`);
+  const probs = strip('probs', 'probabilities', `softmax over the vocabulary: ${cfg.vocabSize.toLocaleString('en-US')} probabilities summing to 1, mostly exactly 0 after filtering.`);
+  op('softmax', [filtered], probs, 'Softmax over the vocabulary.');
+  const nextToken = push({
+    id: 'next_token', label: 'next token id', kind: 'activation', x: 1, z: 1, rowGap: SAMPLING_GAP,
+    dims: [{ name: 'token', size: 1 }], dtype: 'int64',
+    note: 'The output of the whole forward pass: one token id, 8 bytes. In decoding it becomes the next input_ids.',
+  });
+  op('sample', [probs], nextToken, 'Draws one token id from the probabilities (torch.multinomial); greedy decoding takes the argmax instead.');
 
   return { tensors, ops };
 }

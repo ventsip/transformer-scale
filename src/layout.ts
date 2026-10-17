@@ -42,6 +42,8 @@ export interface PlacedTensor {
   heads: (number | null)[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
+  /** Z where the op producing this tensor sits: the bus, or the gap before it when stacked in its row. */
+  opZ: number;
 }
 
 function tiling(s: TensorSpec) {
@@ -80,17 +82,23 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
         let back = ROW_GAP / 2;
         let front = ROW_GAP / 2;
         let width = 0;
+        let stackedFront = false;
         for (const s of items) {
           const t = tiling(s);
           const h = thickness(s, o.thickness);
           width = Math.max(width, t.width);
           let zMin: number;
+          // The op producing a front-row tensor sits in the gap before it: on the bus for the first one.
+          let opZ = 0;
           if (s.kind === 'weight') {
             zMin = -(back + t.depth);
             back += t.depth + ITEM_GAP;
           } else {
-            zMin = front;
-            front += t.depth + ITEM_GAP;
+            const gap = stackedFront ? (s.rowGap ?? ITEM_GAP) : 0;
+            zMin = front + gap;
+            if (stackedFront) opZ = zMin - gap / 2;
+            front = zMin + t.depth;
+            stackedFront = true;
           }
           minZ = Math.min(minZ, zMin);
           maxZ = Math.max(maxZ, zMin + t.depth);
@@ -115,13 +123,14 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
               heads.push(hd);
             }
           }
-          local.push({ spec: s, boxes, heads, busZ: 0 });
+          local.push({ spec: s, boxes, heads, busZ: 0, opZ });
         }
         x0 += width + STATION_GAP;
       }
       const shift = section === 0 ? 0 : behind - SECTION_GAP - maxZ;
       for (const p of local) {
         p.busZ = shift;
+        p.opZ += shift;
         for (const b of p.boxes) b.cz += shift;
       }
       behind = shift + minZ;

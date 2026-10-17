@@ -38,7 +38,7 @@ function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'botto
 function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
   if (out.spec.floor === op.floor) {
     const b = bounds(out, sel);
-    return new THREE.Vector3((b.minX + b.maxX) / 2, b.base + OP_LIFT, out.busZ);
+    return new THREE.Vector3((b.minX + b.maxX) / 2, b.base + OP_LIFT, out.opZ);
   }
   const b = bounds(first);
   return new THREE.Vector3(b.maxX + STATION_GAP / 2, b.base + OP_LIFT, first.busZ);
