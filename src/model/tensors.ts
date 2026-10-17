@@ -39,6 +39,8 @@ export interface TensorSpec {
   filledZ?: number;
   /** Space before this tensor when it is stacked behind another in the same row (default: a small gap). */
   rowGap?: number;
+  /** Place to the right of the previous tensor in its row instead of in front of it. */
+  beside?: boolean;
 }
 
 /**
@@ -230,6 +232,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const ms = tmp('mean', 'mean(x²)', one, 'fp32', 'One value per token.');
     op('mean', [sq], ms, `Mean over the ${cfg.dModel} features of each token.`);
     const r = tmp('rsqrt', '1/√(mean(x²) + ε)', one, 'fp32', 'One scale per token.');
+    tensors.find((t) => t.id === r)!.beside = true;
     op('rsqrt(·+ε)', [ms], r, `Adds ε = ${cfg.rmsNormEps} and takes the reciprocal square root.`);
     const n32 = tmp('n32', 'x / RMS(x), fp32', dModel, 'fp32', 'Every token vector now has RMS 1.');
     op('×', [x32, r], n32, 'Scales each token vector by its own 1/RMS.');
