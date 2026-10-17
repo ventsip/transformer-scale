@@ -41,6 +41,8 @@ export interface TensorSpec {
   rowGap?: number;
   /** Place to the right of the previous tensor in its row instead of in front of it. */
   beside?: boolean;
+  /** Part of the residual stream: the edges that carry it are drawn bold. */
+  residual?: boolean;
 }
 
 /**
@@ -166,6 +168,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     tensors.find((t) => t.id === id)!.heads = { ...heads, axis };
     return id;
   };
+  const residual = (id: string) => {
+    tensors.find((t) => t.id === id)!.residual = true;
+    return id;
+  };
   const op = (label: string, inputs: string[], output: string, note: string) =>
     ops.push({ id: `${floor}:op:${ops.length}`, label, floor, inputs, output, note });
   const matmul = (input: string, w: string, output: string, inDim: Dim, outDim: Dim, extra = '') =>
@@ -255,7 +261,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     prefix = `model.layers.${l}.`;
 
     // Attention section.
-    const x = act('x', 'x: residual stream in', dModel, 'activation', `${TRANSIENT} Embeddings for layer 0, the previous layer's output otherwise.`);
+    const x = residual(act('x', 'x: residual stream in', dModel, 'activation', `${TRANSIENT} Embeddings for layer 0, the previous layer's output otherwise.`));
     next();
     const xNorm = rmsNorm(x, 'input_layernorm.weight', 'x_norm', 'x_norm = RMSNorm(x)');
     next();
@@ -346,7 +352,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const oOut = act('o', 'o = attn · W_o', dModel);
     matmul(attn, wo, oOut, qDim, dModel);
     next();
-    const h = act('h', 'h = x + o: residual stream', dModel);
+    const h = residual(act('h', 'h = x + o: residual stream', dModel));
     op('+', [x, oOut], h, 'Residual add: the attention output is added to the residual stream.');
 
     // MLP section, behind the attention section.
@@ -384,7 +390,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   section = 0;
   station = 0;
   prefix = 'model.';
-  const xLast = act('x', 'x: residual stream out of the last layer', dModel);
+  const xLast = residual(act('x', 'x: residual stream out of the last layer', dModel));
   next();
   const xNorm = rmsNorm(xLast, 'norm.weight', 'x_norm', 'x_norm = RMSNorm(x): final norm');
   next();

@@ -11,6 +11,10 @@ const DOTS_PER_EDGE = 3;
 const PERIOD = 3;
 /** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
 const DOT_SCALE = 0.0015;
+/** Radius of residual-stream tubes as a fraction of their distance to the camera: a steady width on screen. */
+const TUBE_SCALE = 0.0012;
+/** Rebuild tubes when the camera distance has changed by more than this factor since they were built. */
+const TUBE_REBUILD = 1.15;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
 function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
@@ -68,6 +72,8 @@ export class FlowScene {
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private curves: THREE.Curve<THREE.Vector3>[] = [];
   private lines?: THREE.LineSegments;
+  /** Edges that carry the residual stream, drawn as tubes sized for the camera distance they were built at. */
+  private bold: { curve: THREE.Curve<THREE.Vector3>; mid: THREE.Vector3; material: THREE.Material; tube?: THREE.Mesh; builtAt: number }[] = [];
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
   private readonly matrix = new THREE.Matrix4();
@@ -87,8 +93,12 @@ export class FlowScene {
     const colors: number[] = [];
     const color = new THREE.Color();
 
-    const draw = (curve: THREE.Curve<THREE.Vector3>, hex: number) => {
+    const draw = (curve: THREE.Curve<THREE.Vector3>, hex: number, bold: boolean) => {
       this.curves.push(curve);
+      if (bold) {
+        this.bold.push({ curve, mid: curve.getPoint(0.5), material: new THREE.MeshBasicMaterial({ color: hex }), builtAt: 0 });
+        return;
+      }
       const pts = curve.getPoints(32);
       color.setHex(hex);
       for (let i = 0; i < pts.length - 1; i++) {
@@ -98,16 +108,16 @@ export class FlowScene {
     };
 
     /** Within a floor: an arc lifted in proportion to its length. */
-    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number) => {
+    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number, bold = false) => {
       const mid = a.clone().add(b).multiplyScalar(0.5);
       mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
-      draw(new THREE.QuadraticBezierCurve3(a, mid, b), hex);
+      draw(new THREE.QuadraticBezierCurve3(a, mid, b), hex, bold);
     };
 
     /** Between floors: leaves `a` heading straight up and enters `b` from below, heading up. */
-    const riser = (a: THREE.Vector3, b: THREE.Vector3, hex: number) => {
+    const riser = (a: THREE.Vector3, b: THREE.Vector3, hex: number, bold = false) => {
       const lift = Math.max((b.y - a.y) / 2, 2000);
-      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), hex);
+      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), hex, bold);
     };
 
     const label = (text: string, pos: THREE.Vector3, className: string, title = '') => {
@@ -133,14 +143,18 @@ export class FlowScene {
       if (!out || inputs.some((p) => !p)) continue;
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
       const pos = opPosition(op, out, inputs[0]!, sel);
+      // Bold: edges that carry the residual stream (into an op that produces it, and out of it).
+      // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) stay thin.
+      const carriesStream = !!out.spec.residual;
       for (const p of inputs) {
+        const bold = carriesStream && !!p!.spec.residual;
         // Inputs from a lower floor (RoPE tables) rise into the op; same-floor inputs arc.
-        if (p!.spec.floor < op.floor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
-        else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
+        if (p!.spec.floor < op.floor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
+        else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
       }
       const outColor = KIND_COLORS[out.spec.kind].edge;
-      if (out.spec.floor === op.floor) arc(pos, anchor(out, sel), outColor);
-      else riser(pos, anchor(out, sel, 'bottom'), outColor);
+      if (out.spec.floor === op.floor) arc(pos, anchor(out, sel), outColor, carriesStream);
+      else riser(pos, anchor(out, sel, 'bottom'), outColor, carriesStream);
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
     }
@@ -159,6 +173,17 @@ export class FlowScene {
 
   /** Moves the dots along their edges; `seconds` is the elapsed time. */
   tick(seconds: number, camera: THREE.Camera): void {
+    for (const b of this.bold) {
+      const dist = b.mid.distanceTo(camera.position);
+      if (b.tube && dist < b.builtAt * TUBE_REBUILD && dist > b.builtAt / TUBE_REBUILD) continue;
+      if (b.tube) {
+        this.group.remove(b.tube);
+        b.tube.geometry.dispose();
+      }
+      b.tube = new THREE.Mesh(new THREE.TubeGeometry(b.curve, 48, dist * TUBE_SCALE, 6), b.material);
+      b.builtAt = dist;
+      this.group.add(b.tube);
+    }
     if (!this.dots) return;
     let i = 0;
     for (const curve of this.curves) {
@@ -177,6 +202,14 @@ export class FlowScene {
     for (const label of this.labels) this.group.remove(label);
     this.labels = [];
     this.curves = [];
+    for (const b of this.bold) {
+      if (b.tube) {
+        this.group.remove(b.tube);
+        b.tube.geometry.dispose();
+      }
+      b.material.dispose();
+    }
+    this.bold = [];
     if (this.lines) {
       this.group.remove(this.lines);
       this.lines.geometry.dispose();
