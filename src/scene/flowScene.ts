@@ -12,7 +12,7 @@ const PERIOD = 3;
 /** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
 const DOT_SCALE = 0.0015;
 /** Radius of residual-stream tubes as a fraction of their distance to the camera: a steady width on screen. */
-const TUBE_SCALE = 0.0012;
+const TUBE_SCALE = 0.0025;
 /** Rebuild tubes when the camera distance has changed by more than this factor since they were built. */
 const TUBE_REBUILD = 1.15;
 
