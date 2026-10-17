@@ -16,7 +16,7 @@
 - In each section, **stations** run left to right in data-flow order around a **bus** line. Weights sit
   behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
-- Floors above the focused one are lifted out of the way and other floors are dimmed.
+- Floors above the focused one are lifted and floors below it lowered, opening space around it; other floors are dimmed.
 
 ## Data flow
 

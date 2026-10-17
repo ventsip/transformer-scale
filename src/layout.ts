@@ -17,7 +17,7 @@ const SECTION_GAP = 3072;
 const TILE_COLS = 8;
 export const THICKNESS_PER_BYTE = 64;
 
-/** Extra lift for floors above the focused one, so the camera can look down onto it. */
+/** Floors above the focused one are lifted by this much and floors below it lowered, opening space around it. */
 const FOCUS_GAP = 40000;
 
 export type ThicknessMode = 'bytes' | 'elements';
@@ -61,7 +61,7 @@ function thickness(s: TensorSpec, mode: ThicknessMode): number {
 }
 
 export const floorY = (floor: number, o: LayoutOptions) =>
-  floor * o.floorSpacing + (floor > o.focusFloor ? FOCUS_GAP : 0);
+  floor * o.floorSpacing + Math.sign(floor - o.focusFloor) * FOCUS_GAP;
 
 const groupBy = <T, K>(items: T[], key: (t: T) => K) => {
   const map = new Map<K, T[]>();
