@@ -35,9 +35,11 @@
 ## Operation popups
 
 - Clicking an op label that has an interactive view (accent border, pointer cursor) opens a popup explaining it.
-- **÷ temperature**: illustrative logits for the top 40 of 128,256 tokens; a temperature slider; the input and the
-  output (with the input as outlines) on one shared scale; and what the following softmax makes of it, computed over
-  the whole vocabulary (top-token probability, share of the top 40, tokens needed for 90%).
+- **Sampling** (opened from any sampling op: to fp32, ÷ temperature, top-k / top-p, softmax, sample; the clicked step
+  is highlighted): illustrative logits for the top 40 of 128,256 tokens, then each step with its controls and chart -
+  temperature (outlines show the input on the same scale), top-k and top-p (removed tokens as outlines), softmax, and a
+  Sample button that marks the drawn token. Defaults follow Llama 3 (T = 0.6, top-p = 0.9) and HF (top-k = 50); all
+  numbers are computed over the whole vocabulary.
 
 ## Attention heads
 

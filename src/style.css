@@ -368,3 +368,33 @@ button.play {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
+
+.op-stage {
+  margin-top: 14px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.op-stage.focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.op-stage h3 {
+  margin: 0;
+  font: 600 13px/1.3 ui-monospace, Consolas, monospace;
+}
+
+.op-stage .op-popup-note {
+  margin: 4px 0 6px;
+}
+
+.op-chart .bar.picked {
+  fill: #fde68a;
+}
+
+.op-chart .pick-mark {
+  fill: var(--text);
+  font-size: 10px;
+}
