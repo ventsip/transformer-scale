@@ -90,6 +90,9 @@ export type AttentionImpl = 'fused' | 'eager';
 /** dynamic: grows with the tokens (HF default). static: preallocated for a fixed capacity. */
 export type KvCacheImpl = 'dynamic' | 'static';
 
+/** compact: RMSNorm and SwiGLU as single ops. expanded: every intermediate tensor HF allocates. */
+export type ElementwiseDetail = 'compact' | 'expanded';
+
 export interface BuildOptions {
   T: number;
   weightDtype: DType;
@@ -97,12 +100,15 @@ export interface BuildOptions {
   kvDtype: DType;
   attention: AttentionImpl;
   kvCache: KvCacheImpl;
+  elementwise: ElementwiseDetail;
   /** Slots per layer in a static cache. */
   cacheCapacity: number;
 }
 
 const TRANSIENT = 'Transient: during inference it only exists while this layer runs.';
 const KV = 'Written to the KV cache: persists for the whole generation.';
+/** Gap between activations stacked in one station, leaving room for the op between them. */
+const STACK_GAP = 2048;
 
 export const floorCount = (cfg: ModelConfig) => cfg.nLayers + 2;
 
@@ -202,6 +208,38 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const embed = weight('embed_tokens.weight', vocab, dModel, 'Lookup table: each token id selects one row.');
   const ids = push({ id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int64', note: 'Token ids of the prompt.' });
   op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
+  /** An activation stacked behind the previous one in its station's front row, with room for its op. */
+  const stacked = (id: string, label: string, feat: Dim, dtype: DType, note: string) =>
+    push({ id, label, kind: 'activation', x: feat.size, z: T, rowGap: STACK_GAP, dims: [tok, feat], dtype, note });
+  const one: Dim = { name: '1', size: 1 };
+
+  /** RMSNorm with its weight; expanded, every intermediate HF's LlamaRMSNorm allocates. */
+  const rmsNorm = (input: string, weightName: string, id: string, label: string) => {
+    const w = vector(weightName, dModel);
+    if (o.elementwise === 'compact') {
+      const out = act(id, label, dModel);
+      op('RMSNorm', [input, w], out, 'Normalize each token vector by its RMS, then scale by the norm weight.');
+      return out;
+    }
+    const tmp = (suffix: string, tmpLabel: string, dim: Dim, dtype: DType, note: string) =>
+      stacked(`${id}.${suffix}`, tmpLabel, dim, dtype, `${TRANSIENT} ${note}`);
+    const x32 = tmp('fp32', 'x in fp32', dModel, 'fp32', 'Upcast for accuracy: twice the bytes of x.');
+    op('to fp32', [input], x32, 'RMSNorm computes in fp32.');
+    const sq = tmp('sq', 'x²', dModel, 'fp32', 'Squares, elementwise.');
+    op('x²', [x32], sq, 'Elementwise square.');
+    const ms = tmp('mean', 'mean(x²)', one, 'fp32', 'One value per token.');
+    op('mean', [sq], ms, `Mean over the ${cfg.dModel} features of each token.`);
+    const r = tmp('rsqrt', '1/√(mean(x²) + ε)', one, 'fp32', 'One scale per token.');
+    op('rsqrt(·+ε)', [ms], r, `Adds ε = ${cfg.rmsNormEps} and takes the reciprocal square root.`);
+    const n32 = tmp('n32', 'x / RMS(x), fp32', dModel, 'fp32', 'Every token vector now has RMS 1.');
+    op('×', [x32, r], n32, 'Scales each token vector by its own 1/RMS.');
+    const n = tmp('n', `x / RMS(x), ${DTYPES[o.actDtype].label}`, dModel, o.actDtype, 'Cast back before the weight is applied.');
+    op(`to ${DTYPES[o.actDtype].label}`, [n32], n, 'Casts back to the activation dtype.');
+    const out = stacked(id, label, dModel, o.actDtype, TRANSIENT);
+    op('× weight', [n, w], out, `Multiplies each feature by its learned scale: the norm's only ${cfg.dModel} parameters.`);
+    return out;
+  };
+
   const ropeOp = (input: string, output: string, heads: number) =>
     op('RoPE', [input, cos, sin], output,
       `Rotary position embedding: in each of the ${heads} heads, rotates dimension pairs (i, i+${half.size}) by angle pos·θ_i. ` +
@@ -216,9 +254,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     // Attention section.
     const x = act('x', 'x: residual stream in', dModel, 'activation', `${TRANSIENT} Embeddings for layer 0, the previous layer's output otherwise.`);
     next();
-    const n1 = vector('input_layernorm.weight', dModel);
-    const xNorm = act('x_norm', 'x_norm = RMSNorm(x)', dModel);
-    op('RMSNorm', [x, n1], xNorm, 'Normalize each token vector by its RMS, then scale by the norm weight.');
+    const xNorm = rmsNorm(x, 'input_layernorm.weight', 'x_norm', 'x_norm = RMSNorm(x)');
     next();
     const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
     const qRaw = split(act('q_raw', 'x_norm · W_q (before RoPE)', qDim), qHeads);
@@ -314,9 +350,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
 
     // MLP section, behind the attention section.
     nextSection();
-    const n2 = vector('post_attention_layernorm.weight', dModel);
-    const hNorm = act('h_norm', 'h_norm = RMSNorm(h)', dModel);
-    op('RMSNorm', [h, n2], hNorm, 'Normalize each token vector by its RMS, then scale by the norm weight.');
+    const hNorm = rmsNorm(h, 'post_attention_layernorm.weight', 'h_norm', 'h_norm = RMSNorm(h)');
     next();
     const wg = weight('mlp.gate_proj.weight', dModel, ffn);
     const g = act('g', 'g = h_norm · W_gate', ffn);
@@ -326,8 +360,17 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const u = act('u', 'u = h_norm · W_up', ffn);
     matmul(hNorm, wu, u, dModel, ffn);
     next();
-    const a = act('a', 'a = SiLU(g) ⊙ u', ffn);
-    op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.');
+    let a: string;
+    if (o.elementwise === 'expanded') {
+      // HF: act_fn(gate_proj(x)) * up_proj(x): SiLU(g) is its own tensor before the product.
+      const sg = act('silu_g', 'SiLU(g)', ffn);
+      op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise: a full T × d_ffn tensor of its own.');
+      a = stacked('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, TRANSIENT);
+      op('⊙', [sg, u], a, 'Elementwise product with u: the SwiGLU gate.');
+    } else {
+      a = act('a', 'a = SiLU(g) ⊙ u', ffn);
+      op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.');
+    }
     next();
     const wd = weight('mlp.down_proj.weight', ffn, dModel);
     const m = act('m', 'm = a · W_down', dModel);
@@ -342,9 +385,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   prefix = 'model.';
   const xLast = act('x', 'x: residual stream out of the last layer', dModel);
   next();
-  const nf = vector('norm.weight', dModel);
-  const xNorm = act('x_norm', 'x_norm = RMSNorm(x)', dModel);
-  op('RMSNorm', [xLast, nf], xNorm, 'Final norm.');
+  const xNorm = rmsNorm(xLast, 'norm.weight', 'x_norm', 'x_norm = RMSNorm(x): final norm');
   next();
   prefix = '';
   const head = weight('lm_head.weight', dModel, vocab, 'Not tied to the embedding in Llama 3: a second 525M-parameter matrix.');

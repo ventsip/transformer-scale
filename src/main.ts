@@ -23,6 +23,7 @@ const settings: Settings = {
   activations: 'focused',
   attention: 'fused',
   kvCache: 'dynamic',
+  elementwise: 'compact',
   cacheCapacity: cfg.maxContext,
   showFlow: true,
   thickness: 'bytes',

@@ -44,6 +44,13 @@
 - In each layer, `@` produces Q and K before rotation; a `RoPE` op rotates them, fed by risers from the tables below.
   K is cached after rotation.
 
+## Elementwise detail
+
+- *Compact*: RMSNorm and SwiGLU are single ops.
+- *Expanded*: every intermediate HF allocates. RMSNorm: fp32 upcast, x², mean (T × 1), rsqrt (T × 1), scale, cast
+  back, × weight. SwiGLU: SiLU(g) as its own T × d_ffn tensor, then ⊙ u. Intermediates stack along Z in their station,
+  so floors get deeper rather than wider.
+
 ## KV cache
 
 - *Dynamic* (HF default): in prefill the cache keeps K and V as computed, so it is exactly T slots per layer.
