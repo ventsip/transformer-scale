@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { STATION_GAP, type PlacedTensor } from '../layout';
+import type { PlacedTensor } from '../layout';
 import { onPath, type HeadSelection, type OpSpec } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 
@@ -40,14 +40,11 @@ function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'botto
   return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
 }
 
-/** Hovering over the center of its output; beside its first input when the output is on another floor. */
-function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
-  if (out.spec.floor === op.floor) {
-    const b = bounds(out, sel);
-    return new THREE.Vector3((b.minX + b.maxX) / 2, b.top + OP_HOVER, (b.minZ + b.maxZ) / 2);
-  }
-  const b = bounds(first);
-  return new THREE.Vector3(b.maxX + STATION_GAP / 2, b.top + OP_HOVER, first.busZ);
+/** Hovering over the center of its output; when the output is on a higher floor, just below it instead. */
+function opPosition(op: OpSpec, out: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
+  const b = bounds(out, sel);
+  const y = out.spec.floor === op.floor ? b.top + OP_HOVER : b.base - OP_HOVER;
+  return new THREE.Vector3((b.minX + b.maxX) / 2, y, (b.minZ + b.maxZ) / 2);
 }
 
 /**
@@ -144,20 +141,20 @@ export class FlowScene {
       const inputs = op.inputs.map((id) => byId.get(id));
       if (!out || inputs.some((p) => !p)) continue;
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
-      const pos = opPosition(op, out, inputs[0]!, sel);
+      const pos = opPosition(op, out, sel);
+      const crossFloor = out.spec.floor !== op.floor;
       // Bold: edges that carry the residual stream (into an op that produces it, and out of it).
       // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) stay thin.
       const carriesStream = !!out.spec.residual;
       for (const p of inputs) {
         const bold = carriesStream && !!p!.spec.residual;
-        // Inputs from a lower floor (RoPE tables) rise into the op; same-floor inputs arc.
-        if (p!.spec.floor < op.floor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
+        // Inputs from a lower floor (RoPE tables), and inputs of an op that sits under a higher floor, rise into it.
+        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
         else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge, bold);
       }
       const outColor = KIND_COLORS[out.spec.kind].edge;
-      // The op hovers right above its output: a straight drop into it.
-      if (out.spec.floor === op.floor) draw(new THREE.LineCurve3(pos, anchor(out, sel)), outColor, carriesStream);
-      else riser(pos, anchor(out, sel, 'bottom'), outColor, carriesStream);
+      // The op sits right above its output (or right below it, across floors): a straight line into it.
+      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, carriesStream);
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
     }

@@ -26,7 +26,8 @@
   kind they carry; moving dots show direction.
 - **The residual stream** (x, h and the adds between them) is drawn as bold cyan tubes; reads that branch off it
   and branch outputs joining it stay thin.
-- Flow is drawn for the focused floor, plus the op on the floor below that produces its input. Edges between
+- Flow is drawn for the focused floor, plus the op on the floor below that produces its input. An op whose output is
+  on a higher floor sits just below that output; its inputs rise to it. Edges between
   floors are risers: they leave heading up and enter the upper block from below.
 
 ## Attention heads
