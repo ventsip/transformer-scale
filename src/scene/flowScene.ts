@@ -3,6 +3,7 @@ import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { PlacedTensor } from '../layout';
 import { byteCount, onPath, type HeadSelection, type OpSpec } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
+import { hasViz, openOpPopup } from '../ui/opPopup';
 
 /** Height of operation nodes above the floor: they hover over the tensor they produce. */
 const OP_HOVER = 2500;
@@ -172,6 +173,7 @@ export class FlowScene {
       obj.position.copy(pos);
       this.group.add(obj);
       this.labels.push(obj);
+      return div;
     };
 
     // Ops on the focused floor, plus the op on another floor that produces this floor's input.
@@ -196,7 +198,16 @@ export class FlowScene {
       // The op sits right above its output (or right below it, across floors): a straight line into it.
       draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
-      label(text, pos, 'op-label', op.note);
+      const div = label(text, pos, 'op-label', op.note);
+      if (hasViz(op)) {
+        // Opens an interactive explanation; pointerdown is stopped so the click does not reach the scene.
+        div.classList.add('has-viz');
+        div.title = `${op.note}
+
+Click for an interactive view.`;
+        div.addEventListener('pointerdown', (e) => e.stopPropagation());
+        div.addEventListener('click', () => openOpPopup(op));
+      }
     }
 
     // The generation loop: from the sampled token out past the floor labels, down the outside of the

@@ -32,6 +32,13 @@
   on a higher floor sits just below that output; its inputs rise to it. Edges between
   floors are risers: they leave heading up and enter the upper block from below.
 
+## Operation popups
+
+- Clicking an op label that has an interactive view (accent border, pointer cursor) opens a popup explaining it.
+- **÷ temperature**: illustrative logits for the top 40 of 128,256 tokens; a temperature slider; the input and the
+  output (with the input as outlines) on one shared scale; and what the following softmax makes of it, computed over
+  the whole vocabulary (top-token probability, share of the top 40, tokens needed for 90%).
+
 ## Attention heads
 
 - Head-structured tensors (`W_q`, `W_k`, `W_v`, Q, K, V, attn, `W_o`, scores) are drawn as one band per head with
