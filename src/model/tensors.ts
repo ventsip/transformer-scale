@@ -383,8 +383,9 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       op('repeat_kv', [vCached], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
       next();
       // One tile per head: keys along X, queries along Z. Prefill tiles are square and causally masked.
+      // The steps from raw scores to probabilities stack in one station, like an expanded RMSNorm.
       const scoreGrid = (id: string, label: string, dtype: DType, note: string, causal: boolean) => split(push({
-        id, label, kind: 'scores', x: keys, z: n, tiles: cfg.nHeads, causal: causal && !decode, dtype,
+        id, label, kind: 'scores', x: keys, z: n, tiles: cfg.nHeads, causal: causal && !decode, dtype, rowGap: STACK_GAP,
         dims: [{ name: 'heads', size: cfg.nHeads }, { name: 'query', size: n }, { name: 'key', size: keys }],
         note: `${note} One ${n.toLocaleString('en-US')} × ${keys.toLocaleString('en-US')} tile per head; keys run along X, queries along Z.`,
       }), qHeads, 'tiles');
@@ -393,16 +394,13 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       op('QKᵀ/√d', [q, kRep], scores,
         `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}. ${formatFlops(attnFlops / 2)} FLOPs${decode ? '' : ', half of them for entries the mask discards'}.${staticNote}`,
         attnFlops / 2);
-      next();
       let masked = scores;
       if (!decode) {
         masked = scoreGrid('scores_masked', 'QKᵀ/√d + mask', o.actDtype, 'Entries with key > query are now −∞.', true);
         op('+ mask', [scores, causalMask!], masked, 'Adds the causal mask: 0 where key ≤ query, −∞ above the diagonal.');
-        next();
       }
       const probs32 = scoreGrid('probs_fp32', 'softmax(…) in fp32', 'fp32', 'Softmax runs in fp32 for stability: twice the bytes of the scores.', true);
       op('softmax', [masked], probs32, decode ? 'Softmax over the cached keys, upcast to fp32.' : 'Row-wise softmax over keys, upcast to fp32. Masked entries become exactly 0.');
-      next();
       const probs = scoreGrid('probs', `softmax(…) cast to ${DTYPES[o.actDtype].label}`, o.actDtype, 'Attention probabilities cast back to the activation dtype for the · V matmul.', true);
       op(`to ${DTYPES[o.actDtype].label}`, [probs32], probs, 'Casts the probabilities back to the activation dtype: another full copy.');
       next();
