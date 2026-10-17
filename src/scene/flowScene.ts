@@ -13,6 +13,8 @@ const PERIOD = 3;
 const DOT_SCALE = 0.0015;
 /** Radius of residual-stream tubes as a fraction of their distance to the camera: a steady width on screen. */
 const TUBE_SCALE = 0.0025;
+/** Color of the residual stream: distinct from every tensor kind. */
+export const RESIDUAL_COLOR = 0x67e8f9;
 /** Rebuild tubes when the camera distance has changed by more than this factor since they were built. */
 const TUBE_REBUILD = 1.15;
 
@@ -96,7 +98,7 @@ export class FlowScene {
     const draw = (curve: THREE.Curve<THREE.Vector3>, hex: number, bold: boolean) => {
       this.curves.push(curve);
       if (bold) {
-        this.bold.push({ curve, mid: curve.getPoint(0.5), material: new THREE.MeshBasicMaterial({ color: hex }), builtAt: 0 });
+        this.bold.push({ curve, mid: curve.getPoint(0.5), material: new THREE.MeshBasicMaterial({ color: RESIDUAL_COLOR }), builtAt: 0 });
         return;
       }
       const pts = curve.getPoints(32);

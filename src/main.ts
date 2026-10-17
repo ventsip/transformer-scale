@@ -10,7 +10,7 @@ import {
   buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
-import { FlowScene, linkedTensors } from './scene/flowScene';
+import { FlowScene, RESIDUAL_COLOR, linkedTensors } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
 
@@ -244,6 +244,7 @@ document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.weight.fill, 'Weights'),
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
   swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
+  swatch(RESIDUAL_COLOR, 'Residual stream'),
   swatch(KIND_COLORS.buffer.fill, 'Buffers (fixed, not learned)'),
   swatch(KIND_COLORS.scores.fill, 'Attention scores (eager only)'),
   swatch(MASKED_COLORS.fill, 'Causally masked scores'),
