@@ -87,11 +87,46 @@ export function edgeWidthPx(bytes: number): number {
 
 interface Edge {
   curve: THREE.Curve<THREE.Vector3>;
-  mid: THREE.Vector3;
+  /** Start, middle and end: their camera distances decide when the tube needs rebuilding. */
+  probes: THREE.Vector3[];
   color: number;
   widthPx: number;
   tube?: THREE.Mesh;
-  builtAt: number;
+  /** Camera distance to each probe when the tube was built. */
+  builtAt: number[];
+}
+
+const TUBE_SEGMENTS = 48;
+const TUBE_SIDES = 6;
+
+/** Like TubeGeometry, but with a radius that can change along the curve. */
+function tubeGeometry(curve: THREE.Curve<THREE.Vector3>, radiusAt: (p: THREE.Vector3) => number): THREE.BufferGeometry {
+  const frames = curve.computeFrenetFrames(TUBE_SEGMENTS, false);
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const p = new THREE.Vector3();
+  const offset = new THREE.Vector3();
+  for (let i = 0; i <= TUBE_SEGMENTS; i++) {
+    curve.getPointAt(i / TUBE_SEGMENTS, p);
+    const r = radiusAt(p);
+    for (let j = 0; j <= TUBE_SIDES; j++) {
+      const a = (j / TUBE_SIDES) * Math.PI * 2;
+      offset.copy(frames.normals[i]).multiplyScalar(-Math.cos(a)).addScaledVector(frames.binormals[i], Math.sin(a));
+      positions.push(p.x + r * offset.x, p.y + r * offset.y, p.z + r * offset.z);
+    }
+  }
+  const ring = TUBE_SIDES + 1;
+  for (let i = 0; i < TUBE_SEGMENTS; i++) {
+    for (let j = 0; j < TUBE_SIDES; j++) {
+      const a = i * ring + j;
+      const b = (i + 1) * ring + j;
+      indices.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  return geometry;
 }
 
 /**
@@ -121,7 +156,7 @@ export class FlowScene {
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
 
     const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number) =>
-      this.edges.push({ curve, mid: curve.getPoint(0.5), color, widthPx: edgeWidthPx(bytes), builtAt: 0 });
+      this.edges.push({ curve, probes: [0, 0.5, 1].map((t) => curve.getPoint(t)), color, widthPx: edgeWidthPx(bytes), builtAt: [] });
 
     /** Within a floor: an arc lifted in proportion to its length. */
     const arc = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
@@ -187,15 +222,18 @@ export class FlowScene {
     // World size of one screen pixel per unit of distance from the camera.
     const pxPerDist = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / window.innerHeight;
     for (const e of this.edges) {
-      const dist = e.mid.distanceTo(camera.position);
-      if (e.tube && dist < e.builtAt * TUBE_REBUILD && dist > e.builtAt / TUBE_REBUILD) continue;
+      // Rebuild when the camera distance to the start, middle or end has changed noticeably.
+      const dists = e.probes.map((p) => p.distanceTo(camera.position));
+      const stale = !e.tube || dists.some((d, i) => d > e.builtAt[i] * TUBE_REBUILD || d < e.builtAt[i] / TUBE_REBUILD);
+      if (!stale) continue;
       if (e.tube) {
         this.group.remove(e.tube);
         e.tube.geometry.dispose();
       }
-      const radius = (dist * pxPerDist * e.widthPx) / 2;
-      e.tube = new THREE.Mesh(new THREE.TubeGeometry(e.curve, 48, radius, 6), this.material(e.color));
-      e.builtAt = dist;
+      // Radius varies along the tube so every point shows the same pixel width, near or far.
+      const geometry = tubeGeometry(e.curve, (p) => (p.distanceTo(camera.position) * pxPerDist * e.widthPx) / 2);
+      e.tube = new THREE.Mesh(geometry, this.material(e.color));
+      e.builtAt = dists;
       this.group.add(e.tube);
     }
     if (!this.dots) return;
