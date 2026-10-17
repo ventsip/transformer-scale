@@ -205,10 +205,11 @@ export class FlowScene {
     const to = loop && byId.get(loop[1]);
     if (from && to) {
       const a = anchor(from, null);
-      const b = anchor(to, null);
+      // Enters input_ids from below: down past the embedding floor, under it, then up into the block.
+      const b = anchor(to, null, 'bottom');
       const left = Math.min(...placed.flatMap((p) => p.boxes.map((box) => box.cx - box.sx / 2))) - LOOP_MARGIN;
       const top = a.y + OP_HOVER;
-      const entry = b.y + OP_HOVER;
+      const entry = b.y - OP_HOVER;
       const path = new THREE.CatmullRomCurve3([
         a, new THREE.Vector3(a.x, top, a.z), new THREE.Vector3(left, top, a.z),
         new THREE.Vector3(left, entry, b.z), new THREE.Vector3(b.x, entry, b.z), b,
