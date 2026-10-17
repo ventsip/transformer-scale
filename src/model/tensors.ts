@@ -273,30 +273,28 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const kvKind = isStatic ? 'activation' : 'kv';
     const dynamicNote = `${KV} Dynamic cache: in prefill the cache keeps this tensor as is, so it grows with the prompt.`;
     const kvNote = (extra: string) => (isStatic ? `${TRANSIENT} Copied into the static cache buffer.` : `${dynamicNote}${extra}`);
-    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, kvKind, kvNote(' Cached after rotation, so the cache already encodes position.')), kvHeads);
-    ropeOp(kRaw, k, cfg.nKvHeads);
-    next();
-    const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
-    const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
-    matmul(xNorm, wv, v, dModel, kvDim);
-    next();
-    let kCached = k;
-    let vCached = v;
-    if (isStatic) {
-      const cap = o.cacheCapacity;
-      const cacheBuffer = (id: string, label: string) => split(push({
-        id, label, kind: 'kv', x: kvDim.size, z: cap, filledZ: T, dtype: o.kvDtype,
+    // Static cache: each buffer is stacked in front of the tensor it receives, in the same station.
+    const cap = o.cacheCapacity;
+    const cacheWrite = (src: string, id: string, label: string, name: string) => {
+      if (!isStatic) return src;
+      const buffer = split(push({
+        id, label, kind: 'kv', x: kvDim.size, z: cap, filledZ: T, rowGap: STACK_GAP, dtype: o.kvDtype,
         dims: [{ name: 'capacity', size: cap }, kvDim],
         note: `Static cache: allocated up front for ${cap.toLocaleString('en-US')} tokens, whatever the prompt length. ` +
           `Prefill fills the first ${T.toLocaleString('en-US')} slots; decoding fills one more per generated token.`,
       }), kvHeads);
-      kCached = cacheBuffer('k_cache', `past_key_values.layers[${l}].keys`);
-      op('cache write', [k], kCached, 'index_copy_ of K into the preallocated buffer, at positions 0 … T−1.');
-      next();
-      vCached = cacheBuffer('v_cache', `past_key_values.layers[${l}].values`);
-      op('cache write', [v], vCached, 'index_copy_ of V into the preallocated buffer, at positions 0 … T−1.');
-      next();
-    }
+      op('cache write', [src], buffer, `index_copy_ of ${name} into the preallocated buffer, at positions 0 … T−1.`);
+      return buffer;
+    };
+    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, kvKind, kvNote(' Cached after rotation, so the cache already encodes position.')), kvHeads);
+    ropeOp(kRaw, k, cfg.nKvHeads);
+    const kCached = cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
+    next();
+    const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+    const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
+    matmul(xNorm, wv, v, dModel, kvDim);
+    const vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
+    next();
     // Attention reads K and V from the cache.
     const staticNote = isStatic
       ? ` With a static cache HF attends over all ${o.cacheCapacity.toLocaleString('en-US')} slots, masking the empty ones; drawn here for the T filled slots only.`
