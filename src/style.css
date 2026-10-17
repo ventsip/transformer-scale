@@ -200,3 +200,7 @@ button:hover {
   pointer-events: auto;
   cursor: help;
 }
+
+.tt-head {
+  color: #e2e8f0;
+}

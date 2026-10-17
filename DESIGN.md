@@ -27,6 +27,15 @@
 - Flow is drawn for the focused floor only. Data leaving or entering the floor ends in a short labelled stub
   ("→ Layer 1", "from Embedding") rather than an arc across floors.
 
+## Attention heads
+
+- Head-structured tensors (`W_q`, `W_k`, `W_v`, Q, K, V, attn, `W_o`, scores) are drawn as one band per head with
+  no gaps, so the footprint stays exact. Bands run along whichever axis carries the head dimension.
+- Bands are tinted by **KV group**: a K/V head and the query heads that share it get the same hue, which makes
+  grouped-query attention visible (8 groups of 4 strips in Q next to 8 single strips in K).
+- **Clicking a band selects that head** (a K/V band selects its whole group): bands off its path dim, and flow
+  arcs and ops move to the selected bands. The selection holds across layers; Esc or empty space clears it.
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are

@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { STATION_GAP, type PlacedTensor } from '../layout';
-import type { OpSpec } from '../model/tensors';
+import { onPath, type HeadSelection, type OpSpec } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 
 /** Height of operation nodes above the floor. */
@@ -12,9 +12,12 @@ const PERIOD = 3;
 /** Dot radius as a fraction of its distance to the camera: a constant size on screen. */
 const DOT_SCALE = 0.0015;
 
-function bounds(p: PlacedTensor) {
+/** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
+function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
+  const split = p.spec.heads;
+  const boxes = sel && split ? p.boxes.filter((_, i) => onPath(split, p.heads[i]!, sel)) : p.boxes;
   const b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, base: Infinity, top: -Infinity };
-  for (const box of p.boxes) {
+  for (const box of boxes.length ? boxes : p.boxes) {
     b.minX = Math.min(b.minX, box.cx - box.sx / 2);
     b.maxX = Math.max(b.maxX, box.cx + box.sx / 2);
     b.minZ = Math.min(b.minZ, box.cz - box.sz / 2);
@@ -26,15 +29,15 @@ function bounds(p: PlacedTensor) {
 }
 
 /** Where edges attach to a tensor: the center of its top (or bottom) face, all tiles together. */
-function anchor(p: PlacedTensor, face: 'top' | 'bottom' = 'top'): THREE.Vector3 {
-  const b = bounds(p);
+function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'bottom' = 'top'): THREE.Vector3 {
+  const b = bounds(p, sel);
   return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
 }
 
 /** On the bus right behind the output; beside the first input when the output is on another floor. */
-function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor): THREE.Vector3 {
+function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
   if (out.spec.floor === op.floor) {
-    const b = bounds(out);
+    const b = bounds(out, sel);
     return new THREE.Vector3((b.minX + b.maxX) / 2, b.base + OP_LIFT, out.busZ);
   }
   const b = bounds(first);
@@ -70,7 +73,7 @@ export class FlowScene {
 
   constructor(private readonly floorName: (floor: number) => string) {}
 
-  update(ops: OpSpec[], placed: PlacedTensor[], focusFloor: number | null): void {
+  update(ops: OpSpec[], placed: PlacedTensor[], focusFloor: number | null, sel: HeadSelection | null): void {
     this.clear();
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
@@ -119,11 +122,11 @@ export class FlowScene {
       const inputs = op.inputs.map((id) => byId.get(id));
       if (!out || inputs.some((p) => !p)) continue;
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
-      const pos = opPosition(op, out, inputs[0]!);
-      for (const p of inputs) arc(anchor(p!), pos, KIND_COLORS[p!.spec.kind].edge);
+      const pos = opPosition(op, out, inputs[0]!, sel);
+      for (const p of inputs) arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
       const outColor = KIND_COLORS[out.spec.kind].edge;
-      if (out.spec.floor === op.floor) arc(pos, anchor(out), outColor);
-      else riser(pos, anchor(out, 'bottom'), outColor);
+      if (out.spec.floor === op.floor) arc(pos, anchor(out, sel), outColor);
+      else riser(pos, anchor(out, sel, 'bottom'), outColor);
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
     }

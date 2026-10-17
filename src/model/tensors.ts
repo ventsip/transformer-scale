@@ -31,6 +31,35 @@ export interface TensorSpec {
   dims: Dim[];
   dtype: DType;
   note?: string;
+  heads?: HeadSplit;
+}
+
+/**
+ * How a tensor divides into attention heads: equal bands along X or Z, or one tile per head.
+ * Query-indexed tensors have `perGroup` query heads per KV group; KV-indexed ones have 1.
+ */
+export interface HeadSplit {
+  axis: 'x' | 'z' | 'tiles';
+  count: number;
+  perGroup: number;
+}
+
+/** A selected query head (and its KV group), or a whole KV group when `head` is null. */
+export interface HeadSelection {
+  group: number;
+  head: number | null;
+}
+
+export const kvGroup = (split: HeadSplit, head: number) => Math.floor(head / split.perGroup);
+
+export function selectionFor(split: HeadSplit, head: number): HeadSelection {
+  return split.perGroup === 1 ? { group: head, head: null } : { group: kvGroup(split, head), head };
+}
+
+/** Whether band `head` of a tensor with `split` takes part in the selected head's computation. */
+export function onPath(split: HeadSplit, head: number, sel: HeadSelection): boolean {
+  if (split.perGroup === 1) return head === sel.group;
+  return sel.head === null ? kvGroup(split, head) === sel.group : head === sel.head;
 }
 
 /** An operation: no parameters of its own, it combines input tensors into an output tensor. */
@@ -106,6 +135,13 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       dtype: kind === 'kv' ? o.kvDtype : o.actDtype,
       note: note ?? (kind === 'kv' ? KV : TRANSIENT),
     });
+  const qHeads: HeadSplit = { axis: 'x', count: cfg.nHeads, perGroup: cfg.nHeads / cfg.nKvHeads };
+  const kvHeads: HeadSplit = { axis: 'x', count: cfg.nKvHeads, perGroup: 1 };
+  /** Marks a tensor as split into heads; `axis` overrides the split's default. */
+  const split = (id: string, heads: HeadSplit, axis = heads.axis) => {
+    tensors.find((t) => t.id === id)!.heads = { ...heads, axis };
+    return id;
+  };
   const op = (label: string, inputs: string[], output: string, note: string) =>
     ops.push({ id: `${floor}:op:${ops.length}`, label, floor, inputs, output, note });
   const matmul = (input: string, w: string, output: string, inDim: Dim, outDim: Dim, extra = '') =>
@@ -138,37 +174,37 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const xNorm = act('x_norm', 'x_norm = RMSNorm(x)', dModel);
     op('RMSNorm', [x, n1], xNorm, 'Normalize each token vector by its RMS, then scale by the norm weight.');
     next();
-    const wq = weight('self_attn.q_proj.weight', dModel, qDim);
-    const q = act('q', 'Q = x_norm · W_q (+RoPE)', qDim);
+    const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
+    const q = split(act('q', 'Q = x_norm · W_q (+RoPE)', qDim), qHeads);
     matmul(xNorm, wq, q, dModel, qDim, ', then RoPE');
     next();
-    const wk = weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote);
-    const k = act('k', 'K = x_norm · W_k (+RoPE)', kvDim, 'kv');
+    const wk = split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+    const k = split(act('k', 'K = x_norm · W_k (+RoPE)', kvDim, 'kv'), kvHeads);
     matmul(xNorm, wk, k, dModel, kvDim, ', then RoPE');
     next();
-    const wv = weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote);
-    const v = act('v', 'V = x_norm · W_v', kvDim, 'kv');
+    const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+    const v = split(act('v', 'V = x_norm · W_v', kvDim, 'kv'), kvHeads);
     matmul(xNorm, wv, v, dModel, kvDim);
     next();
     const attnFlops = formatFlops(4 * T * T * cfg.nHeads * cfg.headDim);
     let attn: string;
     if (o.showScores) {
-      const scores = push({
+      const scores = split(push({
         id: 'scores', label: 'softmax(QKᵀ/√d): one T×T tile per head', kind: 'scores', x: T, z: T, tiles: cfg.nHeads,
         dims: [{ name: 'heads', size: cfg.nHeads }, tok, tok], dtype: o.actDtype,
         note: 'Never materialized by FlashAttention-style kernels; shown for scale. The causal mask zeroes the upper half.',
-      });
+      }), qHeads, 'tiles');
       op('softmax(QKᵀ)', [q, k], scores, 'Per head: scores = softmax(Q Kᵀ / √d) with a causal mask.');
       next();
-      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim);
+      attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
       op('· V', [scores, v], attn, 'Per head: weighted sum of V rows.');
     } else {
-      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim);
+      attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
       op('attention', [q, k, v], attn,
         `softmax(QKᵀ/√d)·V per head, fused (FlashAttention): the T×T scores never reach memory. ~${attnFlops} FLOPs before causal skipping.`);
     }
     next();
-    const wo = weight('self_attn.o_proj.weight', qDim, dModel);
+    const wo = split(weight('self_attn.o_proj.weight', qDim, dModel), qHeads);
     const oOut = act('o', 'o = attn · W_o', dModel);
     matmul(attn, wo, oOut, qDim, dModel);
     next();

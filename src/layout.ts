@@ -38,6 +38,8 @@ export interface Box {
 export interface PlacedTensor {
   spec: TensorSpec;
   boxes: Box[];
+  /** Attention head of each box (see `spec.heads`), or null. */
+  heads: (number | null)[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
 }
@@ -93,12 +95,27 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
           minZ = Math.min(minZ, zMin);
           maxZ = Math.max(maxZ, zMin + t.depth);
           const boxes: Box[] = [];
+          const heads: (number | null)[] = [];
           for (let i = 0; i < s.tiles; i++) {
             const minX = x0 + (i % t.cols) * (s.x + t.gap);
             const tileZ = zMin + Math.floor(i / t.cols) * (s.z + t.gap);
-            boxes.push({ cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
+            const split = s.heads && s.heads.axis !== 'tiles' ? s.heads : null;
+            if (!split) {
+              boxes.push({ cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
+              heads.push(s.heads?.axis === 'tiles' ? i : null);
+              continue;
+            }
+            // One band per head, no gaps: the tensor keeps its exact footprint.
+            const bx = split.axis === 'x' ? s.x / split.count : s.x;
+            const bz = split.axis === 'z' ? s.z / split.count : s.z;
+            for (let hd = 0; hd < split.count; hd++) {
+              const ox = split.axis === 'x' ? hd * bx : 0;
+              const oz = split.axis === 'z' ? hd * bz : 0;
+              boxes.push({ cx: minX + ox + bx / 2, cy: y + h / 2, cz: tileZ + oz + bz / 2, sx: bx, sy: h, sz: bz });
+              heads.push(hd);
+            }
           }
-          local.push({ spec: s, boxes, busZ: 0 });
+          local.push({ spec: s, boxes, heads, busZ: 0 });
         }
         x0 += width + STATION_GAP;
       }

@@ -6,7 +6,10 @@ import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type Box, type 
 import { LLAMA_3_8B } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
-import { buildModel, byteCount, elementCount, floorCount, floorName, isTransient, type TensorSpec } from './model/tensors';
+import {
+  buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
+  type HeadSelection, type TensorSpec,
+} from './model/tensors';
 import { FlowScene, linkedTensors } from './scene/flowScene';
 import { KIND_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
@@ -77,6 +80,8 @@ let stats: Stats;
 
 /** Tensors on other floors that the focused floor's data flow links to. */
 let linked = new Set<string>();
+/** Selected attention head; it applies to every layer. */
+let selection: HeadSelection | null = null;
 
 const isVisible = (s: TensorSpec) =>
   !isTransient(s) || settings.activations === 'all' || s.floor === settings.focusFloor || linked.has(s.id);
@@ -88,8 +93,8 @@ function rebuild() {
   placed = layoutTensors(specs, settings);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
-  tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor);
-  flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null);
+  tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection);
+  flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection);
   floorLabels.forEach((obj, f) => {
     obj.position.set(-4 * STATION_GAP, floorY(f, settings), 0);
     obj.element.classList.toggle('focused', f === settings.focusFloor);
@@ -200,6 +205,13 @@ const ui = createControls(document.getElementById('controls')!, settings, {
   onFrameFocus: frameFocus,
 });
 
+function describeSelection(sel: HeadSelection): string {
+  const perGroup = cfg.nHeads / cfg.nKvHeads;
+  const first = sel.group * perGroup;
+  const group = `KV group ${sel.group}`;
+  return sel.head === null ? `${group} · Q heads ${first}–${first + perGroup - 1}` : `Q head ${sel.head} · ${group}`;
+}
+
 function renderStats() {
   const kvPerToken = stats.kvBytes / settings.T;
   const rows: [string, string][] = [
@@ -209,6 +221,7 @@ function renderStats() {
     ['Transient activations, one layer', formatBytes(stats.layerActBytes)],
   ];
   if (settings.showScores) rows.push(['Attention scores, one layer', formatBytes(stats.scoresBytes)]);
+  if (selection) rows.push(['Selected head (Esc clears)', describeSelection(selection)]);
   statsEl.replaceChildren(
     ...rows.map(([k, v]) => {
       const div = document.createElement('div');
@@ -251,6 +264,16 @@ function share(s: TensorSpec): string {
   return '';
 }
 
+function headLine({ item, box, head }: Pick): string {
+  const split = item.spec.heads;
+  if (!split || head === null) return '';
+  const band = box.sx * box.sz;
+  const what = split.perGroup === 1
+    ? `KV head ${head} of ${split.count}, shared by Q heads ${head * (cfg.nHeads / cfg.nKvHeads)}–${(head + 1) * (cfg.nHeads / cfg.nKvHeads) - 1}`
+    : `Q head ${head} of ${split.count} · KV group ${kvGroup(split, head)}`;
+  return `<div class="tt-head">${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
+}
+
 function showTooltip(p: Pick, e: PointerEvent) {
   const s = p.item.spec;
   const dims = s.dims.map((d) => `${d.name} ${formatInt(d.size)}`).join(' × ');
@@ -259,6 +282,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
     <div class="tt-kind" style="color:#${KIND_COLORS[s.kind].edge.toString(16)}">${s.kind} · ${DTYPES[s.dtype].label} · ${floorName(cfg, s.floor)}</div>
     <div>${dims}</div>
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
+    ${headLine(p)}
     <div class="tt-share">${share(s)}</div>
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
   tooltip.hidden = false;
@@ -287,9 +311,16 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
   const p = pickAt(e);
   if (e.detail <= 1) lastClick = p ? { id: p.item.spec.id, tile: p.item.boxes.indexOf(p.box) } : null;
+  // A head band selects its head (a KV band its whole group); empty space clears the selection.
+  const split = p?.item.spec.heads;
+  const nextSelection = p && split && p.head !== null ? selectionFor(split, p.head) : p ? selection : null;
+  const selectionChanged = JSON.stringify(nextSelection) !== JSON.stringify(selection);
+  selection = nextSelection;
   if (p && p.item.spec.floor !== settings.focusFloor) {
     settings.focusFloor = p.item.spec.floor;
     ui.refresh();
+    rebuild();
+  } else if (selectionChanged) {
     rebuild();
   }
 });
@@ -302,6 +333,10 @@ window.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
   if (e.key === 'f' || e.key === 'F') frameFocus();
   if (e.key === 'o' || e.key === 'O') overview();
+  if (e.key === 'Escape' && selection) {
+    selection = null;
+    rebuild();
+  }
 });
 
 window.addEventListener('resize', () => {
