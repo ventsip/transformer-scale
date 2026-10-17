@@ -21,6 +21,10 @@ const MAX_STEPS = 9;
 const DOT_MIN_STEPS = 1.5;
 /** Color of the residual stream: distinct from every tensor kind. */
 export const RESIDUAL_COLOR = 0x67e8f9;
+/** Color of the generation loop from the sampled token back to the input. */
+export const LOOP_COLOR = 0xf8fafc;
+/** How far left of the building the generation loop runs. */
+const LOOP_MARGIN = 16384;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
 function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
@@ -116,7 +120,8 @@ export class FlowScene {
     private readonly canvas: HTMLElement,
   ) {}
 
-  update(ops: OpSpec[], placed: PlacedTensor[], focusFloor: number | null, sel: HeadSelection | null): void {
+  /** `loop`: ids of the sampled token and the input it feeds next step, joined by a pipe around the building. */
+  update(ops: OpSpec[], placed: PlacedTensor[], focusFloor: number | null, sel: HeadSelection | null, loop?: [string, string]): void {
     this.clear();
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
@@ -180,6 +185,25 @@ export class FlowScene {
       draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
+    }
+
+    // The generation loop: from the sampled token out past the floor labels, down the outside of the
+    // building, and into the next step's input_ids.
+    const from = loop && byId.get(loop[0]);
+    const to = loop && byId.get(loop[1]);
+    if (from && to) {
+      const a = anchor(from, null);
+      const b = anchor(to, null);
+      const left = Math.min(...placed.flatMap((p) => p.boxes.map((box) => box.cx - box.sx / 2))) - LOOP_MARGIN;
+      const top = a.y + OP_HOVER;
+      const entry = b.y + OP_HOVER;
+      const path = new THREE.CatmullRomCurve3([
+        a, new THREE.Vector3(a.x, top, a.z), new THREE.Vector3(left, top, a.z),
+        new THREE.Vector3(left, entry, b.z), new THREE.Vector3(b.x, entry, b.z), b,
+      ], false, 'centripetal');
+      draw(path, LOOP_COLOR, byteCount(from.spec));
+      label('next step: token → input_ids', new THREE.Vector3(left, (top + entry) / 2, b.z), 'op-label',
+        'The sampled token id is the whole input of the next decode step: 8 bytes go around the loop, while every weight is read again.');
     }
 
     if (this.edges.length === 0) return;

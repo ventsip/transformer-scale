@@ -10,7 +10,7 @@ import {
   buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
-import { FlowScene, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
+import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, maxTokens, type Settings } from './ui/controls';
 
@@ -98,8 +98,11 @@ function rebuild() {
   placed = layoutTensors(specs, settings);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
+  // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
+  const loop: [string, string] = [`${cfg.nLayers + 1}:next_token`, '0:input_ids'];
+  if (settings.showFlow) loop.forEach((id) => linked.add(id));
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection);
-  flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection);
+  flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection, loop);
   floorLabels.forEach((obj, f) => {
     obj.position.set(-4 * STATION_GAP, floorY(f, settings), 0);
     obj.element.classList.toggle('focused', f === settings.focusFloor);
@@ -265,6 +268,7 @@ document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
   swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
   swatch(RESIDUAL_COLOR, 'Residual stream'),
+  swatch(LOOP_COLOR, 'Generation loop'),
   swatch(KIND_COLORS.buffer.fill, 'Buffers (fixed, not learned)'),
   swatch(KIND_COLORS.scores.fill, 'Attention scores (eager only)'),
   swatch(MASKED_COLORS.fill, 'Causally masked scores'),

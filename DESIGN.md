@@ -72,6 +72,8 @@
 - Cache writes differ: a static cache writes one row into its buffer; a dynamic cache (HF `DynamicCache`) uses
   torch.cat, copying the whole previous cache (drawn faded) into a new tensor one row longer. Rows written by this
   step are highlighted.
+- **The generation loop**: a white pipe from the sampled token, down the outside of the building, into input_ids.
+  It carries 8 bytes, so it is the thinnest pipe in the scene: the whole output of a pass that reads every weight.
 
 ## Honesty
 
