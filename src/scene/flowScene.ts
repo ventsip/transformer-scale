@@ -41,10 +41,18 @@ function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor): THREE.V
   return new THREE.Vector3(b.maxX + STATION_GAP / 2, b.base + OP_LIFT, first.busZ);
 }
 
-/** Point on the bus a station to the left of a tensor: where data from another floor enters. */
-function entryPoint(p: PlacedTensor): THREE.Vector3 {
-  const b = bounds(p);
-  return new THREE.Vector3(b.minX - STATION_GAP, b.base + OP_LIFT, p.busZ);
+/**
+ * Tensors on other floors that the focused floor's flow links to: the result its last op sends up,
+ * and the sources of the op that produces its input. They are drawn even when otherwise hidden.
+ */
+export function linkedTensors(ops: OpSpec[], floorOf: (id: string) => number, focusFloor: number): Set<string> {
+  const ids = new Set<string>();
+  for (const op of ops) {
+    const outFloor = floorOf(op.output);
+    if (op.floor === focusFloor && outFloor !== focusFloor) ids.add(op.output);
+    if (outFloor === focusFloor && op.floor !== focusFloor) op.inputs.forEach((id) => ids.add(id));
+  }
+  return ids;
 }
 
 /** Draws operations of the focused floor as labels, with arcs from inputs to op to output and dots moving along them. */
@@ -70,9 +78,9 @@ export class FlowScene {
     const colors: number[] = [];
     const color = new THREE.Color();
 
-    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number) => {
+    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number, low = false) => {
       const mid = a.clone().add(b).multiplyScalar(0.5);
-      mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
+      mid.y = Math.max(a.y, b.y) + (low ? 1000 : Math.min(a.distanceTo(b) * 0.25, 12000) + 200);
       const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
       this.curves.push(curve);
       const pts = curve.getPoints(24);
@@ -94,29 +102,19 @@ export class FlowScene {
       this.labels.push(obj);
     };
 
+    // Ops on the focused floor, plus the op on another floor that produces this floor's input.
+    // Ops whose output is on another floor link to that block directly, with a low arc.
     for (const op of ops) {
       const out = byId.get(op.output);
       const inputs = op.inputs.map((id) => byId.get(id));
       if (!out || inputs.some((p) => !p)) continue;
-      const outColor = KIND_COLORS[out.spec.kind].edge;
-      if (op.floor === focusFloor) {
-        const pos = opPosition(op, out, inputs[0]!);
-        for (const p of inputs) arc(anchor(p!), pos, KIND_COLORS[p!.spec.kind].edge);
-        label(op.label, pos, 'op-label', op.note);
-        if (out.spec.floor === focusFloor) {
-          arc(pos, anchor(out), outColor);
-        } else {
-          // Leaves the floor: a short stub instead of an arc to the (possibly far) next floor.
-          const exit = pos.clone().add(new THREE.Vector3(STATION_GAP * 1.5, 0, 0));
-          arc(pos, exit, outColor);
-          label(`→ ${this.floorName(out.spec.floor)}`, exit, 'flow-exit');
-        }
-      } else if (out.spec.floor === focusFloor) {
-        // Arrives from another floor.
-        const entry = entryPoint(out);
-        arc(entry, anchor(out), outColor);
-        label(`from ${this.floorName(op.floor)}`, entry, 'flow-exit', op.note);
-      }
+      if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
+      const crossFloor = out.spec.floor !== op.floor;
+      const pos = opPosition(op, out, inputs[0]!);
+      for (const p of inputs) arc(anchor(p!), pos, KIND_COLORS[p!.spec.kind].edge);
+      arc(pos, anchor(out), KIND_COLORS[out.spec.kind].edge, crossFloor);
+      const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
+      label(text, pos, 'op-label', op.note);
     }
 
     if (this.curves.length === 0) return;

@@ -7,7 +7,7 @@ import { LLAMA_3_8B } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
 import { buildModel, byteCount, elementCount, floorCount, floorName, isTransient, type TensorSpec } from './model/tensors';
-import { FlowScene } from './scene/flowScene';
+import { FlowScene, linkedTensors } from './scene/flowScene';
 import { KIND_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
 
@@ -75,14 +75,19 @@ let specs: TensorSpec[] = [];
 let placed: PlacedTensor[] = [];
 let stats: Stats;
 
+/** Tensors on other floors that the focused floor's data flow links to. */
+let linked = new Set<string>();
+
 const isVisible = (s: TensorSpec) =>
-  !isTransient(s) || settings.activations === 'all' || s.floor === settings.focusFloor;
+  !isTransient(s) || settings.activations === 'all' || s.floor === settings.focusFloor || linked.has(s.id);
 
 function rebuild() {
   const model = buildModel(cfg, settings);
   specs = model.tensors;
   stats = summarize(specs);
   placed = layoutTensors(specs, settings);
+  const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
+  linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor);
   flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null);
   floorLabels.forEach((obj, f) => {

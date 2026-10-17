@@ -200,10 +200,3 @@ button:hover {
   pointer-events: auto;
   cursor: help;
 }
-
-.flow-exit {
-  color: #cbd5e1;
-  font-size: 11px;
-  font-style: italic;
-  white-space: nowrap;
-}
