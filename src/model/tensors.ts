@@ -5,8 +5,9 @@ import { DTYPES, type DType } from './dtypes';
  * weight: parameters. activation: transient intermediates.
  * kv: activations that are written to the KV cache and persist.
  * scores: attention scores, never materialized by fused attention kernels.
+ * buffer: fixed, non-learned constants stored with the model (not parameters).
  */
-export type TensorKind = 'weight' | 'activation' | 'kv' | 'scores';
+export type TensorKind = 'weight' | 'activation' | 'kv' | 'scores' | 'buffer';
 
 export interface Dim {
   name: string;
@@ -155,11 +156,31 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   };
   const nextFloorX = () => `${floor + 1}:x`;
 
-  // Embedding floor.
+  // Embedding floor: rotary tables first (they feed every layer), then the token embedding.
   prefix = 'model.';
+  const half: Dim = { name: 'head_dim / 2', size: cfg.headDim / 2 };
+  const headDim: Dim = { name: 'head_dim', size: cfg.headDim };
+  const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
+  const invFreq = push({
+    id: 'rotary_emb.inv_freq', label: 'model.rotary_emb.inv_freq', kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
+    note: `RoPE frequencies θ_i = ${cfg.ropeTheta.toLocaleString('en-US')}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
+      `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * cfg.ropeTheta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
+  });
+  const pos = push({ id: 'position_ids', label: 'position_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int64', note: 'Position of each prompt token: 0 … T−1.' });
+  next();
+  const cos = act('cos', 'cos(pos · θ): RoPE table', headDim, 'activation', ropeNote);
+  op('cos(pos·θ)', [pos, invFreq], cos, 'Outer product of positions and frequencies, then cosine; the 64 angles are repeated to fill head_dim.');
+  next();
+  const sin = act('sin', 'sin(pos · θ): RoPE table', headDim, 'activation', ropeNote);
+  op('sin(pos·θ)', [pos, invFreq], sin, 'Outer product of positions and frequencies, then sine; the 64 angles are repeated to fill head_dim.');
+  next();
   const embed = weight('embed_tokens.weight', vocab, dModel, 'Lookup table: each token id selects one row.');
-  const ids = push({ id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int32', note: 'Token ids of the prompt.' });
+  const ids = push({ id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: T, dims: [tok], dtype: 'int64', note: 'Token ids of the prompt.' });
   op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
+  const ropeOp = (input: string, output: string, heads: number) =>
+    op('RoPE', [input, cos, sin], output,
+      `Rotary position embedding: in each of the ${heads} heads, rotates dimension pairs (i, i+${half.size}) by angle pos·θ_i. ` +
+      'No parameters; after it, Q·Kᵀ depends on the distance between positions.');
 
   for (let l = 0; l < cfg.nLayers; l++) {
     floor = l + 1;
@@ -175,12 +196,18 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     op('RMSNorm', [x, n1], xNorm, 'Normalize each token vector by its RMS, then scale by the norm weight.');
     next();
     const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
-    const q = split(act('q', 'Q = x_norm · W_q (+RoPE)', qDim), qHeads);
-    matmul(xNorm, wq, q, dModel, qDim, ', then RoPE');
+    const qRaw = split(act('q_raw', 'x_norm · W_q (before RoPE)', qDim), qHeads);
+    matmul(xNorm, wq, qRaw, dModel, qDim);
+    next();
+    const q = split(act('q', 'Q = RoPE(x_norm · W_q)', qDim), qHeads);
+    ropeOp(qRaw, q, cfg.nHeads);
     next();
     const wk = split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
-    const k = split(act('k', 'K = x_norm · W_k (+RoPE)', kvDim, 'kv'), kvHeads);
-    matmul(xNorm, wk, k, dModel, kvDim, ', then RoPE');
+    const kRaw = split(act('k_raw', 'x_norm · W_k (before RoPE)', kvDim), kvHeads);
+    matmul(xNorm, wk, kRaw, dModel, kvDim);
+    next();
+    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, 'kv', `${KV} Cached after rotation, so the cache already encodes position.`), kvHeads);
+    ropeOp(kRaw, k, cfg.nKvHeads);
     next();
     const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
     const v = split(act('v', 'V = x_norm · W_v', kvDim, 'kv'), kvHeads);
@@ -258,6 +285,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     `Matrix multiply, last position only: [1 × ${cfg.dModel}] @ [${cfg.dModel} × ${cfg.vocabSize}]. ${formatFlops(2 * cfg.dModel * cfg.vocabSize)} FLOPs.`);
 
   return { tensors, ops };
+}
+
+function formatTokens(n: number): string {
+  return n >= 1e6 ? `${(n / 1e6).toPrecision(2)}M` : n >= 1e3 ? `${(n / 1e3).toPrecision(2)}K` : n.toFixed(0);
 }
 
 function formatFlops(n: number): string {

@@ -8,6 +8,8 @@ export interface ModelConfig {
   headDim: number;
   dFfn: number;
   maxContext: number;
+  /** RoPE base: frequencies are ropeTheta^(−2i/headDim). */
+  ropeTheta: number;
 }
 
 // https://huggingface.co/meta-llama/Meta-Llama-3-8B/blob/main/config.json
@@ -21,4 +23,5 @@ export const LLAMA_3_8B: ModelConfig = {
   headDim: 128,
   dFfn: 14336,
   maxContext: 8192,
+  ropeTheta: 500000,
 };

@@ -7,6 +7,7 @@ export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
   activation: { fill: 0xf5a524, edge: 0xffd27a },
   kv: { fill: 0x22c55e, edge: 0x86efac },
   scores: { fill: 0xef4444, edge: 0xf87171 },
+  buffer: { fill: 0xa78bfa, edge: 0xc4b5fd },
 };
 
 /** Color of the causally masked half of attention-score tiles. */

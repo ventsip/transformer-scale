@@ -36,6 +36,14 @@
 - **Clicking a band selects that head** (a K/V band selects its whole group): bands off its path dim, and flow
   arcs and ops move to the selected bands. The selection holds across layers; Esc or empty space clears it.
 
+## Position encoding (RoPE)
+
+- Llama uses rotary position embedding: no parameters. The embedding floor holds what HF allocates for it once per
+  forward pass: `position_ids`, the `inv_freq` buffer (64 frequencies; a fixed buffer, drawn in its own color and not
+  counted as parameters) and the `cos`/`sin` tables (T × head_dim), shared by every layer and head.
+- In each layer, `@` produces Q and K before rotation; a `RoPE` op rotates them, fed by risers from the tables below.
+  K is cached after rotation.
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are

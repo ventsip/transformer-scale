@@ -59,7 +59,7 @@ controls.maxDistance = 5e6;
 
 const tensors = new TensorScene();
 scene.add(tensors.group);
-const flow = new FlowScene((f) => floorName(cfg, f));
+const flow = new FlowScene((f) => floorName(cfg, f), renderer.domElement);
 scene.add(flow.group);
 
 // Floor labels.
@@ -238,6 +238,7 @@ document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.weight.fill, 'Weights'),
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
   swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
+  swatch(KIND_COLORS.buffer.fill, 'Buffers (fixed, not learned)'),
   swatch(KIND_COLORS.scores.fill, 'Attention scores (not stored)'),
   swatch(MASKED_COLORS.fill, 'Causally masked scores'),
 ].join('') +

@@ -46,13 +46,15 @@ function opPosition(op: OpSpec, out: PlacedTensor, first: PlacedTensor, sel: Hea
 
 /**
  * Tensors on other floors that the focused floor's flow links to: the result its last op sends up,
- * and the sources of the op that produces its input. They are drawn even when otherwise hidden.
+ * the sources of the op that produces its input, and inputs its ops take from other floors (RoPE tables).
+ * They are drawn even when otherwise hidden.
  */
 export function linkedTensors(ops: OpSpec[], floorOf: (id: string) => number, focusFloor: number): Set<string> {
   const ids = new Set<string>();
   for (const op of ops) {
     const outFloor = floorOf(op.output);
     if (op.floor === focusFloor && outFloor !== focusFloor) ids.add(op.output);
+    if (op.floor === focusFloor) op.inputs.filter((id) => floorOf(id) !== focusFloor).forEach((id) => ids.add(id));
     if (outFloor === focusFloor && op.floor !== focusFloor) op.inputs.forEach((id) => ids.add(id));
   }
   return ids;
@@ -71,7 +73,11 @@ export class FlowScene {
   private readonly matrix = new THREE.Matrix4();
   private readonly point = new THREE.Vector3();
 
-  constructor(private readonly floorName: (floor: number) => string) {}
+  /** `canvas` receives wheel events that land on labels, so zooming works over them too. */
+  constructor(
+    private readonly floorName: (floor: number) => string,
+    private readonly canvas: HTMLElement,
+  ) {}
 
   update(ops: OpSpec[], placed: PlacedTensor[], focusFloor: number | null, sel: HeadSelection | null): void {
     this.clear();
@@ -109,6 +115,10 @@ export class FlowScene {
       div.className = className;
       div.textContent = text;
       div.title = title;
+      div.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        this.canvas.dispatchEvent(new WheelEvent('wheel', e));
+      }, { passive: false });
       const obj = new CSS2DObject(div);
       obj.position.copy(pos);
       this.group.add(obj);
@@ -123,7 +133,11 @@ export class FlowScene {
       if (!out || inputs.some((p) => !p)) continue;
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
       const pos = opPosition(op, out, inputs[0]!, sel);
-      for (const p of inputs) arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
+      for (const p of inputs) {
+        // Inputs from a lower floor (RoPE tables) rise into the op; same-floor inputs arc.
+        if (p!.spec.floor < op.floor) riser(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
+        else arc(anchor(p!, sel), pos, KIND_COLORS[p!.spec.kind].edge);
+      }
       const outColor = KIND_COLORS[out.spec.kind].edge;
       if (out.spec.floor === op.floor) arc(pos, anchor(out, sel), outColor);
       else riser(pos, anchor(out, sel, 'bottom'), outColor);
