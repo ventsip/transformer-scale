@@ -66,15 +66,16 @@ function rng(seed: number) {
 }
 
 /**
- * Illustrative last-position logits: 60 candidates falling from about 18 to about 0, then the long tail of
- * the remaining vocabulary well below, around −8. Sorted descending, so index = rank − 1.
+ * Illustrative last-position logits: 60 candidates falling from about 18 to about 0, steeply at first and
+ * flattening out, with some jitter; then the long tail of the remaining vocabulary well below, around −8.
+ * Sorted descending, so index = rank − 1.
  */
 function illustrativeLogits(): Float64Array {
   const rand = rng(7);
   const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
   const logits = new Float64Array(VOCAB);
   for (let r = 0; r < VOCAB; r++) {
-    logits[r] = r < 60 ? 18 - 0.45 * r + 0.3 * normal() : -8 + 2 * normal();
+    logits[r] = r < 60 ? 18 - 14 * Math.log(1 + r / 15) + 0.6 * normal() : -8 + 2 * normal();
   }
   return logits.sort().reverse();
 }
