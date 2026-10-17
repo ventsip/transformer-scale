@@ -1,9 +1,11 @@
 import type { ThicknessMode } from '../layout';
 import type { DType } from '../model/dtypes';
-import type { AttentionImpl, ElementwiseDetail, KvCacheImpl } from '../model/tensors';
+import type { AttentionImpl, ElementwiseDetail, KvCacheImpl, Mode } from '../model/tensors';
 import { formatInt } from '../format';
 
 export interface Settings {
+  mode: Mode;
+  /** Prefill: prompt length. Decode: tokens already in the cache (L). */
   T: number;
   focusFloor: number;
   activations: 'focused' | 'all';
@@ -31,6 +33,9 @@ export interface ControlsOptions {
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: object = {}): HTMLElementTagNameMap[K] =>
   Object.assign(document.createElement(tag), props);
+
+/** Largest token count for the mode: in decode, the cache plus the new token must fit the context. */
+export const maxTokens = (s: Settings, maxT: number) => (s.mode === 'decode' ? maxT - 1 : maxT);
 
 /** Builds the settings panel; mutates `s` in place and reports which key changed. */
 export function createControls(root: HTMLElement, s: Settings, o: ControlsOptions) {
@@ -71,11 +76,15 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
     return input;
   };
 
-  // Context length on a log scale: slider value is 100 × log2(T).
+  row('Mode', select('mode', [['prefill', 'Prefill (process the prompt)'], ['decode', 'Decode (generate one token)']]));
+
+  // Token count on a log scale: slider value is 100 × log2(T). In decode the cache must leave room for one more.
   const maxLog = Math.round(Math.log2(o.maxT) * 100);
-  row('Prompt length (prefill)', range(0, maxLog, 1, () => Math.round(Math.log2(s.T) * 100), (v) => {
-    s.T = Math.min(o.maxT, Math.max(1, Math.round(2 ** (v / 100))));
-  }, 'T'), () => `${formatInt(s.T)} tokens`);
+  row('Tokens', range(0, maxLog, 1, () => Math.round(Math.log2(s.T) * 100), (v) => {
+    s.T = Math.min(maxTokens(s, o.maxT), Math.max(1, Math.round(2 ** (v / 100))));
+  }, 'T'), () => (s.mode === 'decode'
+    ? `${formatInt(s.T)} in cache, +1 new`
+    : `${formatInt(s.T)} in the prompt`));
 
   row('Focused floor', range(0, o.floorCount - 1, 1, () => s.focusFloor, (v) => (s.focusFloor = v), 'focusFloor'),
     () => o.floorName(s.focusFloor));

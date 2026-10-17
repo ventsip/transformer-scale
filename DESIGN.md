@@ -63,6 +63,16 @@
   transient, a `cache write` copies them into the first T slots, and attention reads from the buffers. Reserved slots
   are drawn dimmed. (HF attends over all slots with a mask in this mode; attention shapes are drawn for T only.)
 
+## Decode
+
+- *Mode* switches between **prefill** (a T-token prompt) and **decode** (one generation step: 1 new token, L already
+  cached). In decode every activation is a single row while every weight is still read in full, so the panel shows
+  ~1 FLOP per byte read: decode is memory-bound. Prefill reuses each weight across T tokens (~T FLOPs per byte).
+- Attention reads the whole cache: K/V pipes carry L+1 rows; eager scores are one row per head.
+- Cache writes differ: a static cache writes one row into its buffer; a dynamic cache (HF `DynamicCache`) uses
+  torch.cat, copying the whole previous cache (drawn faded) into a new tensor one row longer. Rows written by this
+  step are highlighted.
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are

@@ -1,4 +1,4 @@
-import { byteCount, elementCount, type TensorSpec } from './tensors';
+import { byteCount, elementCount, type Model, type TensorSpec } from './tensors';
 
 export interface Stats {
   params: number;
@@ -8,17 +8,32 @@ export interface Stats {
   /** Transient activations of one decoder layer, excluding attention scores. */
   layerActBytes: number;
   scoresBytes: number;
+  /** Floating-point operations of the whole pass. */
+  flops: number;
+  /** Bytes of weights, buffers and KV cache the ops read during the pass (activations not counted). */
+  bytesRead: number;
 }
 
-export function summarize(specs: TensorSpec[]): Stats {
+export function summarize({ tensors, ops }: Model): Stats {
   const sum = (pred: (s: TensorSpec) => boolean, f: (s: TensorSpec) => number) =>
-    specs.filter(pred).reduce((acc, s) => acc + f(s), 0);
+    tensors.filter(pred).reduce((acc, s) => acc + f(s), 0);
+  const isCache = (s: TensorSpec) => s.kind === 'kv' && !s.superseded;
+  const byId = new Map(tensors.map((s) => [s.id, s]));
+  let bytesRead = 0;
+  for (const op of ops) {
+    for (const id of op.inputs) {
+      const s = byId.get(id);
+      if (s && (s.kind === 'weight' || s.kind === 'buffer' || s.kind === 'kv')) bytesRead += op.inputBytes?.[id] ?? byteCount(s);
+    }
+  }
   return {
     params: sum((s) => s.kind === 'weight', elementCount),
     paramBytes: sum((s) => s.kind === 'weight', byteCount),
-    kvElements: sum((s) => s.kind === 'kv', elementCount),
-    kvBytes: sum((s) => s.kind === 'kv', byteCount),
+    kvElements: sum(isCache, elementCount),
+    kvBytes: sum(isCache, byteCount),
     layerActBytes: sum((s) => s.floor === 1 && s.kind === 'activation', byteCount),
     scoresBytes: sum((s) => s.floor === 1 && s.kind === 'scores', byteCount),
+    flops: ops.reduce((acc, op) => acc + (op.flops ?? 0), 0),
+    bytesRead,
   };
 }

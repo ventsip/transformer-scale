@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import type { Box, PlacedTensor } from '../layout';
+import type { Box, PlacedTensor, RowState } from '../layout';
 import { kvGroup, onPath, type HeadSelection, type TensorKind } from '../model/tensors';
 
 export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
@@ -23,8 +23,8 @@ export interface Pick {
   item: PlacedTensor;
   box: Box;
   head: number | null;
-  /** Part of a preallocated buffer that has not been written yet. */
-  reserved: boolean;
+  /** For cache tensors: rows written before, by this pass, or not yet. */
+  rows: RowState;
   part: Part;
 }
 
@@ -34,6 +34,10 @@ const GROUP_TINT = 0.3;
 const OFF_PATH = 0.2;
 /** Brightness of the reserved, not yet written part of a preallocated buffer. */
 const RESERVED = 0.3;
+/** Mix toward white for rows written by this pass (the new token's K or V). */
+const FRESH = 0.6;
+/** Brightness of a tensor this pass replaces, e.g. a dynamic cache before torch.cat. */
+const SUPERSEDED = 0.45;
 /** Brightness of floors other than the focused one. */
 const OTHER_FLOOR = 0.15;
 
@@ -110,10 +114,10 @@ export class TensorScene {
     for (const item of items) {
       item.boxes.forEach((box, i) => {
         const head = item.heads[i];
-        const reserved = item.reserved[i];
-        if (!item.spec.causal) return solid.push({ item, box, head, reserved, part: 'box' });
-        kept.push({ item, box, head, reserved, part: 'kept' });
-        masked.push({ item, box, head, reserved, part: 'masked' });
+        const rows = item.rows[i];
+        if (!item.spec.causal) return solid.push({ item, box, head, rows, part: 'box' });
+        kept.push({ item, box, head, rows, part: 'kept' });
+        masked.push({ item, box, head, rows, part: 'masked' });
       });
     }
     this.addInstanced(solid, this.unitBox, this.solidMaterial);
@@ -138,7 +142,7 @@ export class TensorScene {
     this.highlight.scale.set(box.sx, Math.max(box.sy, 1), box.sz);
   }
 
-  private colorOf({ item, head, part, reserved }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
+  private colorOf({ item, head, part, rows }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
     out.setHex(part === 'masked' ? MASKED_COLORS[which] : KIND_COLORS[item.spec.kind][which]);
     const split = item.spec.heads;
     if (split && head !== null) {
@@ -148,7 +152,9 @@ export class TensorScene {
       if (part !== 'masked') out.lerp(this.groupColor.setHSL(hue, 0.7, 0.5), GROUP_TINT);
       if (this.selection && !onPath(split, head, this.selection)) out.multiplyScalar(OFF_PATH);
     }
-    if (reserved) out.multiplyScalar(RESERVED);
+    if (rows === 'reserved') out.multiplyScalar(RESERVED);
+    if (rows === 'fresh') out.lerp(this.groupColor.setHex(0xffffff), FRESH);
+    if (item.spec.superseded) out.multiplyScalar(SUPERSEDED);
     return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
   }
 

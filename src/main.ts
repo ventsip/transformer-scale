@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
-import { formatBytes, formatCount, formatInt } from './format';
+import { formatBytes, formatCount, formatFlops, formatInt } from './format';
 import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { LLAMA_3_8B } from './model/config';
 import { DTYPES } from './model/dtypes';
@@ -12,12 +12,13 @@ import {
 } from './model/tensors';
 import { FlowScene, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
-import { createControls, type Settings } from './ui/controls';
+import { createControls, maxTokens, type Settings } from './ui/controls';
 
 const cfg = LLAMA_3_8B;
 const FLOORS = floorCount(cfg);
 
 const settings: Settings = {
+  mode: 'prefill',
   T: 2048,
   focusFloor: 1,
   activations: 'focused',
@@ -40,6 +41,7 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 app.appendChild(renderer.domElement);
 await renderer.init();
+const backend = (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
 
 const labelRenderer = new CSS2DRenderer();
 labelRenderer.setSize(window.innerWidth, window.innerHeight);
@@ -92,7 +94,7 @@ const isVisible = (s: TensorSpec) =>
 function rebuild() {
   const model = buildModel(cfg, settings);
   specs = model.tensors;
-  stats = summarize(specs);
+  stats = summarize(model);
   placed = layoutTensors(specs, settings);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
@@ -103,6 +105,7 @@ function rebuild() {
     obj.element.classList.toggle('focused', f === settings.focusFloor);
   });
   renderStats();
+  document.getElementById('title')!.textContent = `${cfg.name} · ${settings.mode} · ${backend}`;
 }
 
 // Camera framing.
@@ -203,7 +206,14 @@ const ui = createControls(document.getElementById('controls')!, settings, {
   maxT: cfg.maxContext,
   floorCount: FLOORS,
   floorName: (f) => floorName(cfg, f),
-  onChange: rebuild,
+  onChange: (key) => {
+    // Switching to decode: the cache plus the new token must still fit the context.
+    if (key === 'mode') {
+      settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
+      ui.refresh();
+    }
+    rebuild();
+  },
   onOverview: () => overview(),
   onFrameFocus: frameFocus,
 });
@@ -217,14 +227,21 @@ function describeSelection(sel: HeadSelection): string {
 
 function renderStats() {
   const isStatic = settings.kvCache === 'static';
-  const kvPerToken = stats.kvBytes / (isStatic ? settings.cacheCapacity : settings.T);
+  const decode = settings.mode === 'decode';
+  // Tokens in the cache once this pass is done.
+  const cached = settings.T + (decode ? 1 : 0);
+  const kvPerToken = stats.kvBytes / (isStatic ? settings.cacheCapacity : cached);
+  const pass = decode ? 'per generated token' : 'for the prompt';
   const rows: [string, string][] = [
     ['Parameters', `${formatCount(stats.params)} · ${formatBytes(stats.paramBytes)}`],
-    [isStatic ? `KV cache, static: ${formatInt(settings.cacheCapacity)} slots` : `KV cache @ ${formatInt(settings.T)} tokens`,
+    [isStatic ? `KV cache, static: ${formatInt(settings.cacheCapacity)} slots` : `KV cache @ ${formatInt(cached)} tokens`,
       `${formatCount(stats.kvElements)} · ${formatBytes(stats.kvBytes)}`],
     ['KV cache per token', formatBytes(kvPerToken)],
-    ...(isStatic ? [['KV cache filled', `${formatInt(settings.T)} of ${formatInt(settings.cacheCapacity)} slots`] as [string, string]] : []),
+    ...(isStatic ? [['KV cache filled', `${formatInt(cached)} of ${formatInt(settings.cacheCapacity)} slots`] as [string, string]] : []),
     ['Transient activations, one layer', formatBytes(stats.layerActBytes)],
+    [`FLOPs ${pass}`, formatFlops(stats.flops)],
+    [`Weights + KV read ${pass}`, formatBytes(stats.bytesRead)],
+    ['FLOPs per byte read', (stats.flops / stats.bytesRead).toPrecision(3)],
   ];
   if (settings.attention === 'eager') rows.push(['Eager score tensors, one layer', formatBytes(stats.scoresBytes)]);
   if (selection) rows.push(['Selected head (Esc clears)', describeSelection(selection)]);
@@ -284,6 +301,15 @@ function maskLine({ part }: Pick): string {
   return '';
 }
 
+function rowLine({ item, rows }: Pick): string {
+  if (item.spec.filledZ === undefined) return '';
+  const fresh = item.spec.freshZ ?? 0;
+  const line = (text: string) => `<div class="tt-head">${text}</div>`;
+  if (rows === 'reserved') return line(`Reserved, not yet written: <b>${formatInt(item.spec.z - item.spec.filledZ)}</b> of ${formatInt(item.spec.z)} slots`);
+  if (rows === 'fresh') return line(`Written by this step: <b>${formatInt(fresh)}</b> row (the new token)`);
+  return line(`Written by earlier passes: <b>${formatInt(item.spec.filledZ - fresh)}</b> rows`);
+}
+
 function headLine({ item, box, head }: Pick): string {
   const split = item.spec.heads;
   if (!split || head === null) return '';
@@ -304,7 +330,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
     ${headLine(p)}
     ${maskLine(p)}
-    ${p.reserved ? `<div class="tt-head">Reserved, not yet written: <b>${formatInt(settings.cacheCapacity - settings.T)}</b> of ${formatInt(settings.cacheCapacity)} slots</div>` : ''}
+    ${rowLine(p)}
     <div class="tt-share">${share(s)}</div>
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
   tooltip.hidden = false;
@@ -367,8 +393,6 @@ window.addEventListener('resize', () => {
   labelRenderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-const backend = (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
-document.getElementById('title')!.textContent = `${cfg.name} · prefill · ${backend}`;
 panel.hidden = false;
 updateProjection();
 

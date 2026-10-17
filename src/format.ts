@@ -17,3 +17,9 @@ export function formatBytes(n: number): string {
 }
 
 export const formatInt = (n: number) => n.toLocaleString('en-US');
+
+export function formatFlops(n: number): string {
+  const units: [number, string][] = [[1e15, 'P'], [1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'K']];
+  for (const [scale, unit] of units) if (n >= scale) return `${(n / scale).toPrecision(3)} ${unit}`;
+  return String(n);
+}
