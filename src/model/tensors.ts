@@ -216,7 +216,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     note: `RoPE frequencies θ_i = ${cfg.ropeTheta.toLocaleString('en-US')}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
       `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * cfg.ropeTheta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
   });
-  // position_ids is placed beside input_ids further on; the RoPE tables here already read it.
+  // position_ids gets its own station after the RoPE tables, next to input_ids; they already read it.
   const pos = `${floor}:position_ids`;
   next();
   const cos = act('cos', 'cos(pos · θ): RoPE table', headDim, 'activation', ropeNote);
@@ -224,6 +224,11 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   next();
   const sin = act('sin', 'sin(pos · θ): RoPE table', headDim, 'activation', ropeNote);
   op('sin(pos·θ)', [pos, invFreq], sin, 'Outer product of positions and frequencies, then sine; the 64 angles are repeated to fill head_dim.');
+  next();
+  push({
+    id: 'position_ids', label: 'position_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64',
+    note: decode ? `Position of the new token: ${past.toLocaleString('en-US')}.` : 'Position of each prompt token: 0 … T−1.',
+  });
   next();
   // Eager prefill needs an explicit causal mask; a single decode query may attend to every cached key.
   let causalMask: string | undefined;
@@ -240,10 +245,6 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const ids = push({
     id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64',
     note: decode ? 'The token sampled by the previous step.' : 'Token ids of the prompt.',
-  });
-  push({
-    id: 'position_ids', label: 'position_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64', beside: true,
-    note: decode ? `Position of the new token: ${past.toLocaleString('en-US')}.` : 'Position of each prompt token: 0 … T−1.',
   });
   op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
   // The lookup reads only the rows it selects, not the whole table.
