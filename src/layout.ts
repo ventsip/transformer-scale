@@ -15,9 +15,13 @@ export const THICKNESS_PER_BYTE = 64;
 
 export type ThicknessMode = 'bytes' | 'elements';
 
+/** Extra lift for floors above the focused one, so the camera can look down onto it. */
+const FOCUS_GAP = 30000;
+
 export interface LayoutOptions {
   floorSpacing: number;
   thickness: ThicknessMode;
+  focusFloor: number;
 }
 
 export interface Box {
@@ -46,7 +50,8 @@ function thickness(s: TensorSpec, mode: ThicknessMode): number {
   return bytes * THICKNESS_PER_BYTE;
 }
 
-export const floorY = (floor: number, o: LayoutOptions) => floor * o.floorSpacing;
+export const floorY = (floor: number, o: LayoutOptions) =>
+  floor * o.floorSpacing + (floor > o.focusFloor ? FOCUS_GAP : 0);
 
 export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTensor[] {
   const byFloor = new Map<number, Map<number, TensorSpec[]>>();

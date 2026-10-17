@@ -29,6 +29,7 @@ export class TensorScene {
   private meshes: { mesh: THREE.InstancedMesh; picks: Pick[] }[] = [];
   private edges?: THREE.LineSegments;
   private readonly highlight: THREE.LineSegments;
+  private focusFloor = -1;
 
   constructor() {
     this.highlight = new THREE.LineSegments(
@@ -40,8 +41,10 @@ export class TensorScene {
     this.group.add(this.highlight);
   }
 
-  update(items: PlacedTensor[]): void {
+  /** Floors other than `focusFloor` are drawn dimmed. */
+  update(items: PlacedTensor[], focusFloor: number): void {
     this.clear();
+    this.focusFloor = focusFloor;
     const solid: Pick[] = [];
     const ghost: Pick[] = [];
     for (const item of items) {
@@ -68,6 +71,10 @@ export class TensorScene {
     this.highlight.scale.set(box.sx, Math.max(box.sy, 1), box.sz);
   }
 
+  private dim(item: PlacedTensor): number {
+    return item.spec.floor === this.focusFloor ? 1 : 0.4;
+  }
+
   private addInstanced(picks: Pick[], material: THREE.Material): void {
     if (picks.length === 0) return;
     const mesh = new THREE.InstancedMesh(this.unitBox, material, picks.length);
@@ -76,7 +83,7 @@ export class TensorScene {
     picks.forEach(({ item, box }, i) => {
       m.makeScale(box.sx, box.sy, box.sz).setPosition(box.cx, box.cy, box.cz);
       mesh.setMatrixAt(i, m);
-      mesh.setColorAt(i, color.setHex(KIND_COLORS[item.spec.kind].fill));
+      mesh.setColorAt(i, color.setHex(KIND_COLORS[item.spec.kind].fill).multiplyScalar(this.dim(item)));
     });
     mesh.computeBoundingBox();
     mesh.computeBoundingSphere();
@@ -90,7 +97,7 @@ export class TensorScene {
     const color = new THREE.Color();
     let o = 0;
     for (const { item, box } of picks) {
-      color.setHex(KIND_COLORS[item.spec.kind].edge);
+      color.setHex(KIND_COLORS[item.spec.kind].edge).multiplyScalar(this.dim(item));
       for (const corner of BOX_EDGES) {
         positions[o] = box.cx + (corner & 1 ? 0.5 : -0.5) * box.sx;
         positions[o + 1] = box.cy + (corner & 2 ? 0.5 : -0.5) * box.sy;

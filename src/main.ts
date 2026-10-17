@@ -77,7 +77,7 @@ function rebuild() {
   specs = buildTensors(cfg, settings);
   stats = summarize(specs);
   placed = layoutTensors(specs, settings);
-  tensors.update(placed.filter((p) => isVisible(p.spec)));
+  tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor);
   floorLabels.forEach((obj, f) => {
     obj.position.set(-STATION_GAP, floorY(f, settings), 0);
     obj.element.classList.toggle('focused', f === settings.focusFloor);
@@ -98,17 +98,46 @@ function boundsOf(items: PlacedTensor[]): THREE.Box3 {
   return box;
 }
 
+/** Width of the screen covered by the settings panel, kept out of the camera's center. */
+function panelInset(): number {
+  const panel = document.getElementById('panel')!;
+  if (panel.hidden || window.innerWidth < 700) return 0;
+  return panel.getBoundingClientRect().width + 24;
+}
+
+function updateProjection() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  // Shift the center of projection to the middle of the area left of the panel.
+  camera.setViewOffset(w, h, panelInset() / 2, 0, w, h);
+  camera.updateProjectionMatrix();
+}
+
+/** Places the camera along `dir` from the box center, at the distance where every corner fits the visible area. */
 function frame(box: THREE.Box3, dir: THREE.Vector3) {
-  const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const dist = (sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2))) * 0.9;
-  controls.target.copy(sphere.center);
-  camera.position.copy(sphere.center).addScaledVector(dir.normalize(), dist);
+  const center = box.getCenter(new THREE.Vector3());
+  const back = dir.clone().normalize();
+  const right = new THREE.Vector3(0, 1, 0).cross(back).normalize();
+  const up = back.clone().cross(right);
+  const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const tanH = (tanV * (window.innerWidth - panelInset())) / window.innerHeight;
+  const corner = new THREE.Vector3();
+  let dist = 0;
+  for (let i = 0; i < 8; i++) {
+    corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(center);
+    const z = corner.dot(back);
+    dist = Math.max(dist, Math.abs(corner.dot(right)) / tanH + z, Math.abs(corner.dot(up)) / tanV + z);
+  }
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(back, dist * 1.05);
   controls.update();
 }
 
-const overview = () => frame(boundsOf(placed), new THREE.Vector3(0.9, 0.5, 1));
+const overview = () => frame(boundsOf(placed), new THREE.Vector3(0.45, 0.35, 1));
+// Front and above: the focus gap keeps the floors overhead out of the line of sight.
 const frameFocus = () =>
-  frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0.15, 0.9, 0.6));
+  frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0, 1.5, 1));
 
 // UI.
 const panel = document.getElementById('panel')!;
@@ -219,8 +248,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
+  updateProjection();
   renderer.setSize(window.innerWidth, window.innerHeight);
   labelRenderer.setSize(window.innerWidth, window.innerHeight);
 });
@@ -228,6 +256,7 @@ window.addEventListener('resize', () => {
 const backend = (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
 document.getElementById('title')!.textContent = `${cfg.name} · prefill · ${backend}`;
 panel.hidden = false;
+updateProjection();
 
 rebuild();
 overview();
