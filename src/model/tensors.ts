@@ -35,6 +35,8 @@ export interface TensorSpec {
   heads?: HeadSplit;
   /** Square query × key tiles where the causal mask applies: the half above the diagonal is masked. */
   causal?: boolean;
+  /** For preallocated buffers: rows along Z actually written; the rest is reserved. */
+  filledZ?: number;
   /** Space before this tensor when it is stacked behind another in the same row (default: a small gap). */
   rowGap?: number;
 }
@@ -85,12 +87,18 @@ export interface Model {
 /** fused: FlashAttention / SDPA kernels. eager: HF eager_attention_forward, one tensor per step. */
 export type AttentionImpl = 'fused' | 'eager';
 
+/** dynamic: grows with the tokens (HF default). static: preallocated for a fixed capacity. */
+export type KvCacheImpl = 'dynamic' | 'static';
+
 export interface BuildOptions {
   T: number;
   weightDtype: DType;
   actDtype: DType;
   kvDtype: DType;
   attention: AttentionImpl;
+  kvCache: KvCacheImpl;
+  /** Slots per layer in a static cache. */
+  cacheCapacity: number;
 }
 
 const TRANSIENT = 'Transient: during inference it only exists while this layer runs.';
@@ -223,13 +231,40 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const kRaw = split(act('k_raw', 'x_norm · W_k (before RoPE)', kvDim), kvHeads);
     matmul(xNorm, wk, kRaw, dModel, kvDim);
     next();
-    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, 'kv', `${KV} Cached after rotation, so the cache already encodes position.`), kvHeads);
+    // Dynamic cache: during prefill the cache keeps K and V themselves. Static cache: they are transient and
+    // copied into buffers preallocated for the full capacity.
+    const isStatic = o.kvCache === 'static';
+    const kvKind = isStatic ? 'activation' : 'kv';
+    const dynamicNote = `${KV} Dynamic cache: in prefill the cache keeps this tensor as is, so it grows with the prompt.`;
+    const kvNote = (extra: string) => (isStatic ? `${TRANSIENT} Copied into the static cache buffer.` : `${dynamicNote}${extra}`);
+    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, kvKind, kvNote(' Cached after rotation, so the cache already encodes position.')), kvHeads);
     ropeOp(kRaw, k, cfg.nKvHeads);
     next();
     const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
-    const v = split(act('v', 'V = x_norm · W_v', kvDim, 'kv'), kvHeads);
+    const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
     matmul(xNorm, wv, v, dModel, kvDim);
     next();
+    let kCached = k;
+    let vCached = v;
+    if (isStatic) {
+      const cap = o.cacheCapacity;
+      const cacheBuffer = (id: string, label: string) => split(push({
+        id, label, kind: 'kv', x: kvDim.size, z: cap, filledZ: T, dtype: o.kvDtype,
+        dims: [{ name: 'capacity', size: cap }, kvDim],
+        note: `Static cache: allocated up front for ${cap.toLocaleString('en-US')} tokens, whatever the prompt length. ` +
+          `Prefill fills the first ${T.toLocaleString('en-US')} slots; decoding fills one more per generated token.`,
+      }), kvHeads);
+      kCached = cacheBuffer('k_cache', `past_key_values.layers[${l}].keys`);
+      op('cache write', [k], kCached, 'index_copy_ of K into the preallocated buffer, at positions 0 … T−1.');
+      next();
+      vCached = cacheBuffer('v_cache', `past_key_values.layers[${l}].values`);
+      op('cache write', [v], vCached, 'index_copy_ of V into the preallocated buffer, at positions 0 … T−1.');
+      next();
+    }
+    // Attention reads K and V from the cache.
+    const staticNote = isStatic
+      ? ` With a static cache HF attends over all ${o.cacheCapacity.toLocaleString('en-US')} slots, masking the empty ones; drawn here for the T filled slots only.`
+      : '';
     // QKᵀ and ·V are 2 FLOPs per multiply-add each; the causal mask lets fused kernels skip key > query.
     const attnFlops = 4 * T * T * cfg.nHeads * cfg.headDim;
     const causalFlops = (attnFlops * (T + 1)) / (2 * T);
@@ -239,10 +274,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const perGroup = cfg.nHeads / cfg.nKvHeads;
       const repNote = `${TRANSIENT} Each KV head copied ${perGroup}× to line up with the query heads.`;
       const kRep = split(act('k_rep', 'repeat_kv(K)', qDim, 'activation', repNote), qHeads);
-      op('repeat_kv', [k], kRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×: GQA saves cache memory, but eager attention spends it again on temporaries.`);
+      op('repeat_kv', [kCached], kRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×: GQA saves cache memory, but eager attention spends it again on temporaries.`);
       next();
       const vRep = split(act('v_rep', 'repeat_kv(V)', qDim, 'activation', repNote), qHeads);
-      op('repeat_kv', [v], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
+      op('repeat_kv', [vCached], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
       next();
       const scoreGrid = (id: string, label: string, dtype: DType, note: string, causal: boolean) => split(push({
         id, label, kind: 'scores', x: T, z: T, tiles: cfg.nHeads, causal, dtype,
@@ -250,7 +285,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         note: `${note} One T×T tile per head; keys run along X, queries along Z.`,
       }), qHeads, 'tiles');
       const scores = scoreGrid('scores', 'QKᵀ/√d', o.actDtype, 'Raw scores, computed in full: including the half the mask is about to discard.', false);
-      op('QKᵀ/√d', [q, kRep], scores, `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}. ${formatFlops(attnFlops / 2)} FLOPs, half of them for entries the mask discards.`);
+      op('QKᵀ/√d', [q, kRep], scores, `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}. ${formatFlops(attnFlops / 2)} FLOPs, half of them for entries the mask discards.${staticNote}`);
       next();
       const masked = scoreGrid('scores_masked', 'QKᵀ/√d + mask', o.actDtype, 'Entries with key > query are now −∞.', true);
       op('+ mask', [scores, causalMask!], masked, 'Adds the causal mask: 0 where key ≤ query, −∞ above the diagonal.');
@@ -265,9 +300,9 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       op('· V', [probs, vRep], attn, `Per head: probability-weighted sum of V rows. ${formatFlops(attnFlops / 2)} FLOPs.`);
     } else {
       attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
-      op('attention', [q, k, v], attn,
+      op('attention', [q, kCached, vCached], attn,
         'softmax(QKᵀ/√d)·V per head, fused (FlashAttention / SDPA): no repeat_kv copies, no mask tensor, and the T×T scores never reach memory. ' +
-        `Causal: query i only attends to keys 0..i, so ~${formatFlops(causalFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`);
+        `Causal: query i only attends to keys 0..i, so ~${formatFlops(causalFlops)} FLOPs instead of ${formatFlops(attnFlops)}.${staticNote}`);
     }
     next();
     const wo = split(weight('self_attn.o_proj.weight', qDim, dModel), qHeads);

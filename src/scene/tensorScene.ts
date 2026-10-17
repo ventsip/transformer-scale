@@ -23,6 +23,8 @@ export interface Pick {
   item: PlacedTensor;
   box: Box;
   head: number | null;
+  /** Part of a preallocated buffer that has not been written yet. */
+  reserved: boolean;
   part: Part;
 }
 
@@ -30,6 +32,8 @@ export interface Pick {
 const GROUP_TINT = 0.3;
 /** Brightness of head bands that are not on the selected head's path. */
 const OFF_PATH = 0.2;
+/** Brightness of the reserved, not yet written part of a preallocated buffer. */
+const RESERVED = 0.3;
 /** Brightness of floors other than the focused one. */
 const OTHER_FLOOR = 0.15;
 
@@ -106,9 +110,10 @@ export class TensorScene {
     for (const item of items) {
       item.boxes.forEach((box, i) => {
         const head = item.heads[i];
-        if (!item.spec.causal) return solid.push({ item, box, head, part: 'box' });
-        kept.push({ item, box, head, part: 'kept' });
-        masked.push({ item, box, head, part: 'masked' });
+        const reserved = item.reserved[i];
+        if (!item.spec.causal) return solid.push({ item, box, head, reserved, part: 'box' });
+        kept.push({ item, box, head, reserved, part: 'kept' });
+        masked.push({ item, box, head, reserved, part: 'masked' });
       });
     }
     this.addInstanced(solid, this.unitBox, this.solidMaterial);
@@ -133,7 +138,7 @@ export class TensorScene {
     this.highlight.scale.set(box.sx, Math.max(box.sy, 1), box.sz);
   }
 
-  private colorOf({ item, head, part }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
+  private colorOf({ item, head, part, reserved }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
     out.setHex(part === 'masked' ? MASKED_COLORS[which] : KIND_COLORS[item.spec.kind][which]);
     const split = item.spec.heads;
     if (split && head !== null) {
@@ -143,6 +148,7 @@ export class TensorScene {
       if (part !== 'masked') out.lerp(this.groupColor.setHSL(hue, 0.7, 0.5), GROUP_TINT);
       if (this.selection && !onPath(split, head, this.selection)) out.multiplyScalar(OFF_PATH);
     }
+    if (reserved) out.multiplyScalar(RESERVED);
     return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
   }
 

@@ -40,6 +40,8 @@ export interface PlacedTensor {
   boxes: Box[];
   /** Attention head of each box (see `spec.heads`), or null. */
   heads: (number | null)[];
+  /** Whether each box is reserved but not yet written (see `spec.filledZ`). */
+  reserved: boolean[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
   /** Z where the op producing this tensor sits: the bus, or the gap before it when stacked in its row. */
@@ -123,7 +125,20 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
               heads.push(hd);
             }
           }
-          local.push({ spec: s, boxes, heads, busZ: 0, opZ });
+          const reserved = boxes.map(() => false);
+          if (s.filledZ !== undefined && s.filledZ < s.z) {
+            // Preallocated buffer: split every box into the rows written so far and the rows still reserved.
+            for (let i = boxes.length - 1; i >= 0; i--) {
+              const b = boxes[i];
+              const start = b.cz - b.sz / 2;
+              const filled = { ...b, cz: start + s.filledZ / 2, sz: s.filledZ };
+              const rest = { ...b, cz: start + (s.filledZ + b.sz) / 2, sz: b.sz - s.filledZ };
+              boxes.splice(i, 1, filled, rest);
+              heads.splice(i, 1, heads[i], heads[i]);
+              reserved.splice(i, 1, false, true);
+            }
+          }
+          local.push({ spec: s, boxes, heads, reserved, busZ: 0, opZ });
         }
         x0 += width + STATION_GAP;
       }

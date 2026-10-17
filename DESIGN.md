@@ -44,6 +44,13 @@
 - In each layer, `@` produces Q and K before rotation; a `RoPE` op rotates them, fed by risers from the tables below.
   K is cached after rotation.
 
+## KV cache
+
+- *Dynamic* (HF default): in prefill the cache keeps K and V as computed, so it is exactly T slots per layer.
+- *Static*: K/V buffers are preallocated per layer for the full capacity (the model's max context). K and V become
+  transient, a `cache write` copies them into the first T slots, and attention reads from the buffers. Reserved slots
+  are drawn dimmed. (HF attends over all slots with a mask in this mode; attention shapes are drawn for T only.)
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are

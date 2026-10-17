@@ -22,6 +22,8 @@ const settings: Settings = {
   focusFloor: 1,
   activations: 'focused',
   attention: 'fused',
+  kvCache: 'dynamic',
+  cacheCapacity: cfg.maxContext,
   showFlow: true,
   thickness: 'bytes',
   weightDtype: 'bf16',
@@ -213,11 +215,14 @@ function describeSelection(sel: HeadSelection): string {
 }
 
 function renderStats() {
-  const kvPerToken = stats.kvBytes / settings.T;
+  const isStatic = settings.kvCache === 'static';
+  const kvPerToken = stats.kvBytes / (isStatic ? settings.cacheCapacity : settings.T);
   const rows: [string, string][] = [
     ['Parameters', `${formatCount(stats.params)} · ${formatBytes(stats.paramBytes)}`],
-    [`KV cache @ ${formatInt(settings.T)} tokens`, `${formatCount(stats.kvElements)} · ${formatBytes(stats.kvBytes)}`],
+    [isStatic ? `KV cache, static: ${formatInt(settings.cacheCapacity)} slots` : `KV cache @ ${formatInt(settings.T)} tokens`,
+      `${formatCount(stats.kvElements)} · ${formatBytes(stats.kvBytes)}`],
     ['KV cache per token', formatBytes(kvPerToken)],
+    ...(isStatic ? [['KV cache filled', `${formatInt(settings.T)} of ${formatInt(settings.cacheCapacity)} slots`] as [string, string]] : []),
     ['Transient activations, one layer', formatBytes(stats.layerActBytes)],
   ];
   if (settings.attention === 'eager') rows.push(['Eager score tensors, one layer', formatBytes(stats.scoresBytes)]);
@@ -293,6 +298,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
     ${headLine(p)}
     ${maskLine(p)}
+    ${p.reserved ? `<div class="tt-head">Reserved, not yet written: <b>${formatInt(settings.cacheCapacity - settings.T)}</b> of ${formatInt(settings.cacheCapacity)} slots</div>` : ''}
     <div class="tt-share">${share(s)}</div>
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
   tooltip.hidden = false;
