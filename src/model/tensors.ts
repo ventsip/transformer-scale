@@ -186,22 +186,24 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const v = split(act('v', 'V = x_norm · W_v', kvDim, 'kv'), kvHeads);
     matmul(xNorm, wv, v, dModel, kvDim);
     next();
-    const attnFlops = formatFlops(4 * T * T * cfg.nHeads * cfg.headDim);
+    // QKᵀ and ·V are 2 FLOPs per multiply-add each; the causal mask lets fused kernels skip key > query.
+    const attnFlops = 4 * T * T * cfg.nHeads * cfg.headDim;
+    const causalFlops = (attnFlops * (T + 1)) / (2 * T);
     let attn: string;
     if (o.showScores) {
       const scores = split(push({
         id: 'scores', label: 'softmax(QKᵀ/√d): one T×T tile per head', kind: 'scores', x: T, z: T, tiles: cfg.nHeads,
         dims: [{ name: 'heads', size: cfg.nHeads }, tok, tok], dtype: o.actDtype,
-        note: 'Never materialized by FlashAttention-style kernels; shown for scale. The causal mask zeroes the upper half.',
+        note: 'Never materialized by FlashAttention-style kernels; shown for scale. Eager attention allocates every tile in full, masked half included.',
       }), qHeads, 'tiles');
-      op('softmax(QKᵀ)', [q, k], scores, 'Per head: scores = softmax(Q Kᵀ / √d) with a causal mask.');
+      op('softmax(QKᵀ)', [q, k], scores, 'Per head: softmax(Q Kᵀ / √d + mask). The causal mask sets entries with key > query to −∞, so they become 0.');
       next();
       attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
       op('· V', [scores, v], attn, 'Per head: weighted sum of V rows.');
     } else {
       attn = split(act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim), qHeads);
       op('attention', [q, k, v], attn,
-        `softmax(QKᵀ/√d)·V per head, fused (FlashAttention): the T×T scores never reach memory. ~${attnFlops} FLOPs before causal skipping.`);
+        `softmax(QKᵀ/√d)·V per head, fused (FlashAttention): the T×T scores never reach memory. Causal: query i only attends to keys 0..i, so ~${formatFlops(causalFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`);
     }
     next();
     const wo = split(weight('self_attn.o_proj.weight', qDim, dModel), qHeads);

@@ -11,7 +11,7 @@ import {
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
 import { FlowScene, linkedTensors } from './scene/flowScene';
-import { KIND_COLORS, TensorScene, type Pick } from './scene/tensorScene';
+import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
 
 const cfg = LLAMA_3_8B;
@@ -220,7 +220,7 @@ function renderStats() {
     ['KV cache per token', formatBytes(kvPerToken)],
     ['Transient activations, one layer', formatBytes(stats.layerActBytes)],
   ];
-  if (settings.showScores) rows.push(['Attention scores, one layer', formatBytes(stats.scoresBytes)]);
+  if (settings.showScores) rows.push(['Attention scores, one layer', `${formatBytes(stats.scoresBytes)}, ~half masked`]);
   if (selection) rows.push(['Selected head (Esc clears)', describeSelection(selection)]);
   statsEl.replaceChildren(
     ...rows.map(([k, v]) => {
@@ -232,14 +232,15 @@ function renderStats() {
   );
 }
 
+const swatch = (hex: number, label: string) =>
+  `<span><i style="background:#${hex.toString(16).padStart(6, '0')}"></i>${label}</span>`;
 document.getElementById('legend')!.innerHTML = [
-  ['weight', 'Weights'],
-  ['activation', 'Transient activations'],
-  ['kv', 'K, V: KV cache'],
-  ['scores', 'Attention scores (not stored)'],
-]
-  .map(([k, label]) => `<span><i style="background:#${KIND_COLORS[k as keyof typeof KIND_COLORS].fill.toString(16).padStart(6, '0')}"></i>${label}</span>`)
-  .join('') +
+  swatch(KIND_COLORS.weight.fill, 'Weights'),
+  swatch(KIND_COLORS.activation.fill, 'Transient activations'),
+  swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
+  swatch(KIND_COLORS.scores.fill, 'Attention scores (not stored)'),
+  swatch(MASKED_COLORS.fill, 'Causally masked scores'),
+].join('') +
   `<p>1 unit = 1 element along both floor axes. Thickness: 1 byte = ${THICKNESS_PER_BYTE} units (exaggerated).
   Weights: input dim → X, output dim → Z. Activations: features → X, tokens → Z.</p>`;
 
@@ -264,6 +265,13 @@ function share(s: TensorSpec): string {
   return '';
 }
 
+function maskLine({ part }: Pick): string {
+  const T = settings.T;
+  if (part === 'kept') return `<div class="tt-head">Kept by the causal mask (key ≤ query): <b>${formatCount((T * (T + 1)) / 2)}</b> entries per head</div>`;
+  if (part === 'masked') return `<div class="tt-head">Causally masked (key > query): <b>${formatCount((T * (T - 1)) / 2)}</b> entries per head, −∞ before softmax, 0 after</div>`;
+  return '';
+}
+
 function headLine({ item, box, head }: Pick): string {
   const split = item.spec.heads;
   if (!split || head === null) return '';
@@ -283,6 +291,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
     <div>${dims}</div>
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
     ${headLine(p)}
+    ${maskLine(p)}
     <div class="tt-share">${share(s)}</div>
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
   tooltip.hidden = false;

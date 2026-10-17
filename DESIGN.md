@@ -42,6 +42,9 @@
   drawn only on the focused floor. K and V are written to the KV cache and are drawn on every floor.
 - **Not-stored tensors are ghosts.** Attention scores (heads × T × T) are never materialized by fused attention
   kernels; they are optional, translucent, and labelled as such.
+- **The causal mask** splits each score tile along its diagonal (keys along X, queries along Z): the half with
+  key ≤ query is computed, the other half is drawn as masked. Eager attention still allocates it; fused kernels skip it,
+  which is why the fused attention op reports about half the FLOPs.
 - **Never exaggerate silently.** Sub-pixel tensors (norm weights, logits) stay at true size; 1px edges keep them visible.
   The thickness exaggeration is stated in the legend.
 - **Every object is inspectable:** shape, element count, bytes, and share of its category on hover.
