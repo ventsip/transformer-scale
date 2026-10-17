@@ -9,15 +9,18 @@ const OP_HOVER = 2500;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
-/** Smallest radius of a flow dot, in screen pixels. */
-const DOT_MIN_PX = 1.5;
-/** Edge width: 1 px at 8 KiB, plus this much per doubling of bytes, up to MAX_WIDTH_PX. */
-export const PX_PER_DOUBLING = 0.36;
-const MAX_WIDTH_PX = 9;
+/**
+ * Pipe diameters are in world units, so they have perspective like the blocks. A width "step" is
+ * WIDTH_UNIT world units: about one screen pixel at the focused-floor view.
+ */
+const WIDTH_UNIT = 65;
+/** Pipe width in steps: 1 at 8 KiB, plus this much per doubling of bytes, up to MAX_STEPS. */
+const STEPS_PER_DOUBLING = 0.36;
+const MAX_STEPS = 9;
+/** Smallest flow-dot radius, in width steps. */
+const DOT_MIN_STEPS = 1.5;
 /** Color of the residual stream: distinct from every tensor kind. */
 export const RESIDUAL_COLOR = 0x67e8f9;
-/** Rebuild tubes when the camera distance has changed by more than this factor since they were built. */
-const TUBE_REBUILD = 1.15;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
 function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
@@ -80,57 +83,19 @@ function flowBytes(p: PlacedTensor, sel: HeadSelection | null, override?: number
   return (total * on) / all;
 }
 
-/** On-screen width in pixels of an edge carrying `bytes`: logarithmic, 1 px at 8 KiB. */
-export function edgeWidthPx(bytes: number): number {
-  return Math.min(MAX_WIDTH_PX, Math.max(1, 1 + (Math.log2(Math.max(bytes, 1)) - 13) * PX_PER_DOUBLING));
+/** Pipe diameter in world units for `bytes`: logarithmic, one width step at 8 KiB. */
+export function pipeDiameter(bytes: number): number {
+  const steps = Math.min(MAX_STEPS, Math.max(1, 1 + (Math.log2(Math.max(bytes, 1)) - 13) * STEPS_PER_DOUBLING));
+  return steps * WIDTH_UNIT;
 }
 
 interface Edge {
   curve: THREE.Curve<THREE.Vector3>;
-  /** Start, middle and end: their camera distances decide when the tube needs rebuilding. */
-  probes: THREE.Vector3[];
-  color: number;
-  widthPx: number;
-  tube?: THREE.Mesh;
-  /** Camera distance to each probe when the tube was built. */
-  builtAt: number[];
-}
-
-const TUBE_SEGMENTS = 48;
-const TUBE_SIDES = 6;
-
-/** Like TubeGeometry, but with a radius that can change along the curve. */
-function tubeGeometry(curve: THREE.Curve<THREE.Vector3>, radiusAt: (p: THREE.Vector3) => number): THREE.BufferGeometry {
-  const frames = curve.computeFrenetFrames(TUBE_SEGMENTS, false);
-  const positions: number[] = [];
-  const indices: number[] = [];
-  const p = new THREE.Vector3();
-  const offset = new THREE.Vector3();
-  for (let i = 0; i <= TUBE_SEGMENTS; i++) {
-    curve.getPointAt(i / TUBE_SEGMENTS, p);
-    const r = radiusAt(p);
-    for (let j = 0; j <= TUBE_SIDES; j++) {
-      const a = (j / TUBE_SIDES) * Math.PI * 2;
-      offset.copy(frames.normals[i]).multiplyScalar(-Math.cos(a)).addScaledVector(frames.binormals[i], Math.sin(a));
-      positions.push(p.x + r * offset.x, p.y + r * offset.y, p.z + r * offset.z);
-    }
-  }
-  const ring = TUBE_SIDES + 1;
-  for (let i = 0; i < TUBE_SEGMENTS; i++) {
-    for (let j = 0; j < TUBE_SIDES; j++) {
-      const a = i * ring + j;
-      const b = (i + 1) * ring + j;
-      indices.push(a, b, a + 1, b, b + 1, a + 1);
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex(indices);
-  return geometry;
+  diameter: number;
 }
 
 /**
- * Draws operations of the focused floor as labels, with tubes from inputs to op to output whose width
+ * Draws operations of the focused floor as labels, with pipes from inputs to op to output whose thickness
  * grows with the log of the bytes they carry, and dots moving along them.
  */
 export class FlowScene {
@@ -139,6 +104,7 @@ export class FlowScene {
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private readonly materials = new Map<number, THREE.Material>();
   private edges: Edge[] = [];
+  private tubes: THREE.Mesh[] = [];
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
   private readonly matrix = new THREE.Matrix4();
@@ -155,8 +121,13 @@ export class FlowScene {
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
 
-    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number) =>
-      this.edges.push({ curve, probes: [0, 0.5, 1].map((t) => curve.getPoint(t)), color, widthPx: edgeWidthPx(bytes), builtAt: [] });
+    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number) => {
+      const diameter = pipeDiameter(bytes);
+      this.edges.push({ curve, diameter });
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, diameter / 2, 8), this.material(color));
+      this.tubes.push(tube);
+      this.group.add(tube);
+    };
 
     /** Within a floor: an arc lifted in proportion to its length. */
     const arc = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
@@ -217,32 +188,16 @@ export class FlowScene {
     this.group.add(this.dots);
   }
 
-  /** Keeps tubes at their pixel widths for the current camera distance and moves the dots along the edges. */
-  tick(seconds: number, camera: THREE.PerspectiveCamera): void {
-    // World size of one screen pixel per unit of distance from the camera.
-    const pxPerDist = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / window.innerHeight;
-    for (const e of this.edges) {
-      // Rebuild when the camera distance to the start, middle or end has changed noticeably.
-      const dists = e.probes.map((p) => p.distanceTo(camera.position));
-      const stale = !e.tube || dists.some((d, i) => d > e.builtAt[i] * TUBE_REBUILD || d < e.builtAt[i] / TUBE_REBUILD);
-      if (!stale) continue;
-      if (e.tube) {
-        this.group.remove(e.tube);
-        e.tube.geometry.dispose();
-      }
-      // Radius varies along the tube so every point shows the same pixel width, near or far.
-      const geometry = tubeGeometry(e.curve, (p) => (p.distanceTo(camera.position) * pxPerDist * e.widthPx) / 2);
-      e.tube = new THREE.Mesh(geometry, this.material(e.color));
-      e.builtAt = dists;
-      this.group.add(e.tube);
-    }
+  /** Moves the dots along the edges; `seconds` is the elapsed time. */
+  tick(seconds: number): void {
     if (!this.dots) return;
     let i = 0;
     for (const e of this.edges) {
+      // Slightly wider than its pipe, so it shows as a bead moving along it.
+      const r = Math.max(DOT_MIN_STEPS * WIDTH_UNIT, e.diameter * 0.6);
       for (let d = 0; d < DOTS_PER_EDGE; d++) {
         const t = (seconds / PERIOD + d / DOTS_PER_EDGE) % 1;
         e.curve.getPoint(t, this.point);
-        const r = this.point.distanceTo(camera.position) * pxPerDist * Math.max(DOT_MIN_PX, e.widthPx * 0.6);
         this.matrix.makeScale(r, r, r).setPosition(this.point);
         this.dots.setMatrixAt(i++, this.matrix);
       }
@@ -259,11 +214,11 @@ export class FlowScene {
   private clear(): void {
     for (const label of this.labels) this.group.remove(label);
     this.labels = [];
-    for (const e of this.edges) {
-      if (!e.tube) continue;
-      this.group.remove(e.tube);
-      e.tube.geometry.dispose();
+    for (const tube of this.tubes) {
+      this.group.remove(tube);
+      tube.geometry.dispose();
     }
+    this.tubes = [];
     this.edges = [];
     if (this.dots) {
       this.group.remove(this.dots);

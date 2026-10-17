@@ -23,7 +23,8 @@
 - **Operations** (`@`, RMSNorm, `+`, attention, SiLU ⊙, lookup) have no parameters, so they get no world size:
   they are screen-space labels hovering above the center of the tensor they produce. Hover for shapes and FLOPs.
 - **Edges** arc from each input up into the operation and drop straight into its output, colored by the tensor
-  kind they carry, with a width that grows with the log of the bytes they carry (8 KiB ≈ 1 px, 16 MiB ≈ 5 px);
+  kind they carry, as pipes whose diameter grows with the log of the bytes they carry. Diameters are in world
+  units (8 KiB = 65, 16 MiB ≈ 320), so pipes have perspective like the blocks; unlike the blocks they are not to scale;
   the embedding lookup counts only the rows it reads, and a selected head only its share. Moving dots show direction.
 - **The residual stream** (x, h and the adds between them) is drawn in cyan; reads that branch off it
   and branch outputs joining it keep their kind's color.
