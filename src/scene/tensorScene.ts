@@ -22,6 +22,8 @@ export interface Pick {
 const GROUP_TINT = 0.3;
 /** Brightness of head bands that are not on the selected head's path. */
 const OFF_PATH = 0.2;
+/** Brightness of floors other than the focused one. */
+const OTHER_FLOOR = 0.15;
 
 /** Renders placed tensors: instanced solid boxes, ghost boxes for scores, and 1px edges for all. */
 export class TensorScene {
@@ -90,7 +92,7 @@ export class TensorScene {
       out.lerp(this.groupColor.setHSL(hue, 0.7, 0.5), GROUP_TINT);
       if (this.selection && !onPath(split, head, this.selection)) out.multiplyScalar(OFF_PATH);
     }
-    return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : 0.4);
+    return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
   }
 
   private addInstanced(picks: Pick[], material: THREE.Material): void {
