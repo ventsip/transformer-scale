@@ -25,10 +25,10 @@ function bounds(p: PlacedTensor) {
   return b;
 }
 
-/** Where edges attach to a tensor: the center of its top face (all tiles together). */
-function anchor(p: PlacedTensor): THREE.Vector3 {
+/** Where edges attach to a tensor: the center of its top (or bottom) face, all tiles together. */
+function anchor(p: PlacedTensor, face: 'top' | 'bottom' = 'top'): THREE.Vector3 {
   const b = bounds(p);
-  return new THREE.Vector3((b.minX + b.maxX) / 2, b.top, (b.minZ + b.maxZ) / 2);
+  return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
 }
 
 /** On the bus right behind the output; beside the first input when the output is on another floor. */
@@ -61,7 +61,7 @@ export class FlowScene {
   private readonly lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
   private readonly dotGeometry = new THREE.SphereGeometry(1, 12, 8);
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  private curves: THREE.QuadraticBezierCurve3[] = [];
+  private curves: THREE.Curve<THREE.Vector3>[] = [];
   private lines?: THREE.LineSegments;
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
@@ -78,17 +78,27 @@ export class FlowScene {
     const colors: number[] = [];
     const color = new THREE.Color();
 
-    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number, low = false) => {
-      const mid = a.clone().add(b).multiplyScalar(0.5);
-      mid.y = Math.max(a.y, b.y) + (low ? 1000 : Math.min(a.distanceTo(b) * 0.25, 12000) + 200);
-      const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
+    const draw = (curve: THREE.Curve<THREE.Vector3>, hex: number) => {
       this.curves.push(curve);
-      const pts = curve.getPoints(24);
+      const pts = curve.getPoints(32);
       color.setHex(hex);
       for (let i = 0; i < pts.length - 1; i++) {
         positions.push(pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
         colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
       }
+    };
+
+    /** Within a floor: an arc lifted in proportion to its length. */
+    const arc = (a: THREE.Vector3, b: THREE.Vector3, hex: number) => {
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
+      draw(new THREE.QuadraticBezierCurve3(a, mid, b), hex);
+    };
+
+    /** Between floors: leaves `a` heading straight up and enters `b` from below, heading up. */
+    const riser = (a: THREE.Vector3, b: THREE.Vector3, hex: number) => {
+      const lift = Math.max((b.y - a.y) / 2, 2000);
+      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), hex);
     };
 
     const label = (text: string, pos: THREE.Vector3, className: string, title = '') => {
@@ -109,10 +119,11 @@ export class FlowScene {
       const inputs = op.inputs.map((id) => byId.get(id));
       if (!out || inputs.some((p) => !p)) continue;
       if (op.floor !== focusFloor && out.spec.floor !== focusFloor) continue;
-      const crossFloor = out.spec.floor !== op.floor;
       const pos = opPosition(op, out, inputs[0]!);
       for (const p of inputs) arc(anchor(p!), pos, KIND_COLORS[p!.spec.kind].edge);
-      arc(pos, anchor(out), KIND_COLORS[out.spec.kind].edge, crossFloor);
+      const outColor = KIND_COLORS[out.spec.kind].edge;
+      if (out.spec.floor === op.floor) arc(pos, anchor(out), outColor);
+      else riser(pos, anchor(out, 'bottom'), outColor);
       const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
       label(text, pos, 'op-label', op.note);
     }
