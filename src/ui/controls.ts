@@ -7,6 +7,7 @@ export interface Settings {
   focusFloor: number;
   activations: 'focused' | 'all';
   showScores: boolean;
+  showFlow: boolean;
   thickness: ThicknessMode;
   weightDtype: DType;
   actDtype: DType;
@@ -76,15 +77,19 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
 
   row('Transient activations', select('activations', [['focused', 'Focused floor only (inference)'], ['all', 'Every floor']]));
 
-  const scores = el('input', { type: 'checkbox' });
-  refreshers.push(() => (scores.checked = s.showScores));
-  scores.addEventListener('change', () => {
-    s.showScores = scores.checked;
-    o.onChange('showScores');
-  });
-  const scoresRow = el('label', { className: 'row check' });
-  scoresRow.append(scores, el('span', { textContent: 'Show materialized attention scores' }));
-  root.append(scoresRow);
+  const checkbox = (key: 'showScores' | 'showFlow', text: string) => {
+    const input = el('input', { type: 'checkbox' });
+    refreshers.push(() => (input.checked = s[key]));
+    input.addEventListener('change', () => {
+      s[key] = input.checked;
+      o.onChange(key);
+    });
+    const wrap = el('label', { className: 'row check' });
+    wrap.append(input, el('span', { textContent: text }));
+    root.append(wrap);
+  };
+  checkbox('showFlow', 'Show data flow on the focused floor');
+  checkbox('showScores', 'Show materialized attention scores');
 
   row('Thickness', select('thickness', [['bytes', 'Bytes per element'], ['elements', 'Uniform (elements only)']]));
   row('Weights dtype', select('weightDtype', [['bf16', 'bf16'], ['fp8', 'fp8'], ['int4', 'int4'], ['fp32', 'fp32']]));

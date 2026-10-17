@@ -188,3 +188,22 @@ button:hover {
 [hidden] {
   display: none !important;
 }
+
+.op-label {
+  padding: 1px 7px;
+  color: #f1f5f9;
+  background: rgba(15, 18, 25, 0.88);
+  border: 1px solid #64748b;
+  border-radius: 999px;
+  font: 11px/1.4 ui-monospace, Consolas, monospace;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: help;
+}
+
+.flow-exit {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-style: italic;
+  white-space: nowrap;
+}

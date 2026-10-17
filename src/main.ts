@@ -6,7 +6,8 @@ import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type PlacedTens
 import { LLAMA_3_8B } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
-import { buildTensors, byteCount, elementCount, floorCount, floorName, isTransient, type TensorSpec } from './model/tensors';
+import { buildModel, byteCount, elementCount, floorCount, floorName, isTransient, type TensorSpec } from './model/tensors';
+import { FlowScene } from './scene/flowScene';
 import { KIND_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, type Settings } from './ui/controls';
 
@@ -18,6 +19,7 @@ const settings: Settings = {
   focusFloor: 1,
   activations: 'focused',
   showScores: false,
+  showFlow: true,
   thickness: 'bytes',
   weightDtype: 'bf16',
   actDtype: 'bf16',
@@ -53,6 +55,8 @@ controls.maxDistance = 5e6;
 
 const tensors = new TensorScene();
 scene.add(tensors.group);
+const flow = new FlowScene((f) => floorName(cfg, f));
+scene.add(flow.group);
 
 // Floor labels.
 const floorLabels = Array.from({ length: FLOORS }, (_, f) => {
@@ -74,12 +78,14 @@ const isVisible = (s: TensorSpec) =>
   !isTransient(s) || settings.activations === 'all' || s.floor === settings.focusFloor;
 
 function rebuild() {
-  specs = buildTensors(cfg, settings);
+  const model = buildModel(cfg, settings);
+  specs = model.tensors;
   stats = summarize(specs);
   placed = layoutTensors(specs, settings);
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor);
+  flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null);
   floorLabels.forEach((obj, f) => {
-    obj.position.set(-STATION_GAP, floorY(f, settings), 0);
+    obj.position.set(-4 * STATION_GAP, floorY(f, settings), 0);
     obj.element.classList.toggle('focused', f === settings.focusFloor);
   });
   renderStats();
@@ -242,7 +248,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
   if (e.key === 'f' || e.key === 'F') frameFocus();
   if (e.key === 'o' || e.key === 'O') overview();
 });
@@ -261,7 +267,9 @@ updateProjection();
 rebuild();
 overview();
 
+const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  flow.tick(clock.getElapsedTime());
   controls.update();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);

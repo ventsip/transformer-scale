@@ -11,9 +11,21 @@
 ## Layout
 
 - One **floor** per stage: embedding, one per decoder layer, LM head. Floors stack along Y.
-- On each floor, **stations** run left to right in data-flow order. Weights sit in the back row (−Z),
-  the activations they produce in the front row (+Z).
+- A layer floor has two **sections**: attention in front, MLP behind it. This keeps floors near 2.5:1
+  instead of a 5.6:1 strip.
+- In each section, **stations** run left to right in data-flow order around a **bus** line. Weights sit
+  behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
+- Floors above the focused one are lifted out of the way and other floors are dimmed.
+
+## Data flow
+
+- **Operations** (`@`, RMSNorm, `+`, attention, SiLU ⊙, lookup) have no parameters, so they get no world size:
+  they are screen-space labels on the bus, right behind the tensor they produce. Hover for shapes and FLOPs.
+- **Edges** arc from each input to the operation and from the operation to its output, colored by the tensor
+  kind they carry; moving dots show direction.
+- Flow is drawn for the focused floor only. Data leaving or entering the floor ends in a short labelled stub
+  ("→ Layer 1", "from Embedding") rather than an arc across floors.
 
 ## Honesty
 
