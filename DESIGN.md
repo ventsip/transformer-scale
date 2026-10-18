@@ -76,7 +76,8 @@
   marked, and its largest gap to the exact x · Φ(x); one illustrative token's h_fc and a = GELU(h_fc), both ends of
   d_ffn; then what HF's plain-PyTorch implementation costs at the current pass's size: eight kernels, each a full
   T × d_ffn tensor, against one read and one write fused.
-- **LayerNorm** (GPT-2, opened from `LayerNorm`): the same illustrative token as RMSNorm, with shift and scale sliders;
+- **LayerNorm** (GPT-2, opened from `LayerNorm`): an illustrative token of the full d_model, drawn by both ends (statistics
+  over all of it), with shift and scale sliders;
   x with its mean, x − mean (the step RMSNorm leaves out, with how much RMSNorm's output would move under the shift),
   division by √(var + ε) against ±1 lines, then weight, bias and output; and the fused kernel's real traffic.
 - **RoPE** (opened from `cos(pos·θ)` / `sin(pos·θ)` on the embedding floor, or `RoPE` in any layer; computed from the

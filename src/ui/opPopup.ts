@@ -1171,19 +1171,28 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
 /** Features of the illustrative token vector, standing in for d_model. */
 const NORM_FEATURES = 64;
 const NORM_EPS = 1e-5;
-/** Residual streams have a few outlier features far larger than the rest ("massive activations"). */
-const OUTLIERS: [number, number][] = [[11, 14], [40, -9]];
+/**
+ * Residual streams have a few outlier features far larger than the rest ("massive activations"): [index, value], a
+ * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector).
+ */
+const OUTLIERS: [number, number][] = [[11, 14], [-24, -9]];
+const outlierIndex = (i: number, length: number) => (i < 0 ? length + i : i);
+/** Features of a full-length token shown as bars: the first NORM_HEAD and the last NORM_TAIL. */
+const NORM_HEAD = 32;
+const NORM_TAIL = 24;
 
 /**
- * One illustrative token of the residual stream, with its outliers, and a norm's learned per-feature scales for it
- * (mostly 0.2–0.6, smaller on the outlier features). `normal` draws further values from the same generator.
+ * One illustrative token of the residual stream, `length` features with its outliers, and a norm's learned
+ * per-feature scales for it (mostly 0.2–0.6, smaller on the outlier features). `normal` draws further values from the
+ * same generator.
  */
-function illustrativeToken() {
+function illustrativeToken(length = NORM_FEATURES) {
   const normal = gaussian(rng(5));
-  const base = Array.from({ length: NORM_FEATURES }, () => 0.8 * normal());
-  for (const [i, v] of OUTLIERS) base[i] = v;
+  const outliers = OUTLIERS.map(([i, v]) => [outlierIndex(i, length), v]);
+  const base = Array.from({ length }, () => 0.8 * normal());
+  for (const [i, v] of outliers) base[i] = v;
   const gamma = base.map(() => Math.abs(0.4 + 0.12 * normal()));
-  for (const [i] of OUTLIERS) gamma[i] = 0.05;
+  for (const [i] of outliers) gamma[i] = 0.05;
   return { base, gamma, normal };
 }
 
@@ -1241,7 +1250,7 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
     const n = x.map((v) => v * r);
     const out = n.map((v, i) => v * gamma[i]);
     const rmsOf = (vs: number[]) => Math.sqrt(vs.reduce((a, v) => a + v * v, 0) / vs.length);
-    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[i], 0) / (ms * NORM_FEATURES);
+    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[outlierIndex(i, NORM_FEATURES)], 0) / (ms * NORM_FEATURES);
 
     cX.draw({ values: x, ...extent(x), ticks, tickLabel, describe: (i) => `feature ${i} · x = ${f(x[i])}` });
     fX.innerHTML = `RMS(x) = <b>${f(Math.sqrt(ms))}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
@@ -1279,18 +1288,28 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
 // LayerNorm (GPT-2): (x − mean(x)) / √(var(x) + ε) · weight + bias
 
 function layerNormViz(body: HTMLElement): void {
-  const { base, gamma, normal } = illustrativeToken();
+  // The whole d_model vector; the charts show both ends of it, and the statistics are over all of it.
+  const { base, gamma, normal } = illustrativeToken(model.dModel);
   // Learned biases: illustrative, small.
   const beta = base.map(() => 0.1 * normal());
   const eps = model.normEps;
   const mean = (vs: number[]) => vs.reduce((a, b) => a + b, 0) / vs.length;
   const f = normValue;
-  const ticks = NORM_TICKS;
-  const tickLabel = String;
+  const ends = bothEnds(model.dModel, NORM_HEAD, NORM_TAIL, [0, 16]);
+  const shown = (vs: number[]) => ends.values((k) => vs[k]);
+  const axis = { gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
+  /** Chart columns of vs with their range (including 0 and the columns extra), and the hover text of each column. */
+  const series = (vs: number[], text: (k: number) => string, extra: number[] = []) => {
+    const values = shown(vs);
+    return {
+      values, ...axis, ...extentWithZero([...values, ...extra]),
+      describe: (i: number) => (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(ends.index(i))}`),
+    };
+  };
 
   const sInput = stageSection(body, true, 'x: one token',
-    `The residual stream of one token. Illustrative: ${NORM_FEATURES} features standing in for d_model (${formatInt(model.dModel)}), ` +
-    'including two outliers. The sliders shift and scale x: LayerNorm undoes both.');
+    `The residual stream of one token. Illustrative values for both ends of its ${formatInt(model.dModel)} features (d_model), ` +
+    'including two outliers; mean and variance are over all of them. The sliders shift and scale x: LayerNorm undoes both.');
   const slider = (label: string, min: number, max: number, value: number) => {
     const input = el('input', { type: 'range', min: String(min), max: String(max), step: '0.01', value: String(value) });
     const shown = el('b');
@@ -1355,31 +1374,25 @@ function layerNormViz(body: HTMLElement): void {
     const baseRms = Math.sqrt(mean(base.map((v) => v * v)));
     const rmsDrift = Math.sqrt(mean(x.map((v, i) => (v / rms - base[i] / baseRms) ** 2)));
 
-    cX.draw({ values: x, ...extentWithZero(x), ticks, tickLabel, refs: [{ value: mu, label: 'mean' }], describe: (i) => `feature ${i} · x = ${f(x[i])}` });
+    cX.draw({ ...series(x, (k) => `x = ${f(x[k])}`), refs: [{ value: mu, label: 'mean' }] });
     fX.innerHTML = `mean(x) = <b>${f(mu)}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
 
-    cCentered.draw({
-      values: centered, ghost: x, ...extentWithZero([...centered, ...x]), ticks, tickLabel,
-      describe: (i) => `feature ${i} · ${f(x[i])} − ${f(mu)} = ${f(centered[i])}`,
-    });
+    cCentered.draw({ ...series(centered, (k) => `${f(x[k])} − ${f(mu)} = ${f(centered[k])}`, shown(x)), ghost: shown(x) });
     fCenter.innerHTML =
       `Shift x with the slider: the outlines move, the bars do not. RMSNorm divides x itself by its RMS, so a shift ` +
       `changes its output: by <b>${f(rmsDrift)}</b> (RMS of the change) at this setting.`;
 
     cNorm.draw({
-      values: n, ...extentWithZero([...n, 1, -1]), ticks, tickLabel, refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
-      describe: (i) => `feature ${i} · ${f(centered[i])} × ${f(r)} = ${f(n[i])}`,
+      ...series(n, (k) => `${f(centered[k])} × ${f(r)} = ${f(n[k])}`, [1, -1]),
+      refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
     });
     fNorm.innerHTML =
       `var(x) = <b>${f(variance)}</b>, ε = ${eps}, so 1/√(var + ε) = <b>${f(r)}</b>. After: mean <b>${Math.abs(mean(n)) < 1e-9 ? 0 : f(mean(n))}</b>, ` +
       `standard deviation <b>${Math.sqrt(mean(n.map((v) => v * v))).toFixed(3)}</b>, whatever the sliders say.`;
 
-    cGamma.draw({ values: gamma, ...extentWithZero(gamma), ticks, tickLabel, describe: (i) => `feature ${i} · weight = ${f(gamma[i])}` });
-    cBeta.draw({ values: beta, ...extentWithZero(beta), ticks, tickLabel, describe: (i) => `feature ${i} · bias = ${f(beta[i])}` });
-    cOut.draw({
-      values: out, ghost: n, ...extentWithZero([...out, ...n]), ticks, tickLabel,
-      describe: (i) => `feature ${i} · ${f(n[i])} × ${f(gamma[i])} + ${f(beta[i])} = ${f(out[i])}`,
-    });
+    cGamma.draw(series(gamma, (k) => `weight = ${f(gamma[k])}`));
+    cBeta.draw(series(beta, (k) => `bias = ${f(beta[k])}`));
+    cOut.draw({ ...series(out, (k) => `${f(n[k])} × ${f(gamma[k])} + ${f(beta[k])} = ${f(out[k])}`, n), ghost: shown(n) });
   }
   shift.input.addEventListener('input', update);
   scale.input.addEventListener('input', update);
