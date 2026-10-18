@@ -1,5 +1,6 @@
 import { formatBytes } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
+import { routing } from '../model/routing';
 import type { Mode, OpSpec } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
@@ -33,6 +34,18 @@ type GluStage = 'silu' | 'gate';
 function swigluStage(op: OpSpec): GluStage | null {
   if (op.label === 'SiLU ⊙' || op.label === 'SiLU') return 'silu';
   if (op.label === '⊙') return 'gate';
+  return null;
+}
+
+/** The stages of the mixture-of-experts panel. */
+type MoeStage = 'router' | 'dispatch' | 'combine';
+
+/** MoE ops, by output: the router's tensors, each expert's gathered rows, and the weighted sum back into m. */
+function moeStage(op: OpSpec): MoeStage | null {
+  const out = op.output.split(':')[1];
+  if (['router_logits', 'router_probs', 'selected_experts', 'routing_weights'].includes(out)) return 'router';
+  if (/^e\d+\.x$/.test(out)) return 'dispatch';
+  if (/^e\d+\.ys$/.test(out) || (out === 'm' && op.label.includes('index_add'))) return 'combine';
   return null;
 }
 
@@ -82,6 +95,8 @@ function normStage(op: OpSpec): NormStage | null {
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
   const sampling = samplingStage(op);
   if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
+  const moe = moeStage(op);
+  if (moe) return { title: 'Mixture of experts: route, dispatch, combine', render: (body) => moeViz(body, moe, op.floor - 1) };
   const attn = attnStage(op);
   if (attn) return { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body) => attentionViz(body, attn) };
   const rope = ropeStage(op);
@@ -597,6 +612,127 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   sRel.append(fRel);
 
   (focus === 'freq' ? sFreq : sRot).scrollIntoView({ block: 'center' });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mixture of experts: router softmax → top-k → renormalize; dispatch; weighted combine
+
+/** Features shown for an expert output. */
+const MOE_FEATURES = 24;
+
+function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
+  const { nExperts: E, topK: K } = model.moe!;
+  const expertIds = Array.from({ length: E }, (_, e) => e);
+  const expertTick = (e: number) => `E${e}`;
+  const pct = (p: number) => `${(100 * p).toFixed(1)}%`;
+
+  // 1. Router.
+  const sRouter = stageSection(body, focus === 'router', `Router: softmax, top-${K}, renormalize`,
+    `A ${model.dModel.toLocaleString('en-US')} × ${E} weight scores the ${E} experts for each token; softmax (in fp32) turns the ` +
+    `scores into probabilities, the top ${K} are kept, and their probabilities are rescaled to sum to 1. Illustrative scores for one token.`);
+  const another = el('button', { textContent: 'Another token' });
+  const row = el('div', { className: 'op-popup-control' });
+  row.append(another);
+  const cLogits = barChart('router logits');
+  const cProbs = barChart('softmax', `outlines: experts outside the top ${K}`);
+  const cWeights = barChart('routing weights', `the top ${K}, rescaled to sum to 1`);
+  const fRouter = el('div', { className: 'op-popup-facts' });
+  sRouter.append(row, cLogits.root, cProbs.root, cWeights.root, fRouter);
+
+  // 2. Dispatch, from the same seeded routing the scene draws.
+  const decode = pass.mode === 'decode';
+  const n = decode ? 1 : pass.T;
+  const past = decode ? pass.T : 0;
+  const counts = routing(model).counts(layer, past, past + n);
+  const sDispatch = stageSection(body, focus === 'dispatch', `Dispatch: layer ${layer}, this pass`,
+    `Each expert gathers the rows of the tokens that picked it and runs its MLP on those only. ` +
+    `These are the counts the scene draws (seeded, illustrative routing).`);
+  const cCounts = barChart('tokens per expert', decode ? '' : `line: the even share, ${K}T / ${E}`);
+  const fDispatch = el('div', { className: 'op-popup-facts' });
+  sDispatch.append(cCounts.root, fDispatch);
+  const even = (K * n) / E;
+  cCounts.draw({
+    values: counts, lo: 0, hi: Math.max(...counts, even) * 1.1, ticks: expertIds, tickLabel: expertTick,
+    refs: decode ? [] : [{ value: even, label: 'even' }], removed: counts.map((c) => c === 0),
+    describe: (e) => (counts[e] ? `E${e} · ${counts[e].toLocaleString('en-US')} tokens` : `E${e} · idle: its weights are not read`),
+  });
+  const used = expertIds.filter((e) => counts[e] > 0);
+  fDispatch.innerHTML = decode
+    ? `The new token goes to experts <b>${used.join('</b> and <b>')}</b>; the other ${E - used.length} stay idle, so this ` +
+      `layer reads only <b>${used.length}</b> of ${E} experts' weights. Generate to watch the pair change token by token.`
+    : `${K} × ${n.toLocaleString('en-US')} = <b>${(K * n).toLocaleString('en-US')}</b> token slots; the busiest expert gets ` +
+      `<b>${Math.max(...counts).toLocaleString('en-US')}</b> (${(Math.max(...counts) / even).toFixed(2)}× its even share) and the quietest ` +
+      `<b>${Math.min(...counts).toLocaleString('en-US')}</b>. HF's loop drops no tokens; training adds a load-balancing loss to keep this even.`;
+
+  // 3. Combine.
+  const sCombine = stageSection(body, focus === 'combine', 'Combine: m = Σ weight × expert output',
+    `Each expert's output rows are scaled by their routing weights and added back at their tokens' positions (index_add_). ` +
+    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above.`);
+  const cParts = Array.from({ length: K }, () => barChart('', ''));
+  const cSum = barChart('m: the sum', 'outlines: the first expert alone');
+  sCombine.append(...cParts.map((c) => c.root), cSum.root);
+
+  let seed = 21;
+  function update() {
+    const rand = rng(seed);
+    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const logits = expertIds.map(() => 1.2 * normal());
+    const m = Math.max(...logits);
+    const exp = logits.map((v) => Math.exp(v - m));
+    const sum = exp.reduce((a, b) => a + b, 0);
+    const probs = exp.map((v) => v / sum);
+    const top = [...expertIds].sort((a, b) => probs[b] - probs[a]).slice(0, K);
+    const kept = top.reduce((a, e) => a + probs[e], 0);
+    const weights = expertIds.map((e) => (top.includes(e) ? probs[e] / kept : 0));
+
+    const lHi = Math.max(0, ...logits);
+    const lLo = Math.min(0, ...logits);
+    cLogits.draw({ values: logits, lo: lLo, hi: lHi, ticks: expertIds, tickLabel: expertTick, describe: (e) => `E${e} · logit ${logits[e].toFixed(2)}` });
+    cProbs.draw({
+      values: probs, lo: 0, hi: 1, percent: true, ticks: expertIds, tickLabel: expertTick,
+      removed: expertIds.map((e) => !top.includes(e)),
+      describe: (e) => `E${e} · p = ${pct(probs[e])}${top.includes(e) ? ' · kept' : ''}`,
+    });
+    cWeights.draw({
+      values: weights, lo: 0, hi: 1, percent: true, ticks: expertIds, tickLabel: expertTick, ghost: probs,
+      describe: (e) => (weights[e] ? `E${e} · ${pct(probs[e])} ÷ ${pct(kept)} = ${pct(weights[e])}` : `E${e} · not used`),
+    });
+    fRouter.innerHTML =
+      `This token goes to <b>E${top.join('</b> and <b>E')}</b>. Together they had <b>${pct(kept)}</b> of the probability; ` +
+      `after rescaling their weights are <b>${top.map((e) => pct(weights[e])).join('</b> and <b>')}</b>. ` +
+      `The router is ${(model.dModel * E).toLocaleString('en-US')} parameters per layer, against ` +
+      `${(3 * model.dModel * model.dFfn / 1e6).toFixed(0)}M in each expert.`;
+
+    // Illustrative expert outputs: different experts, different vectors.
+    const outputs = top.map(() => Array.from({ length: MOE_FEATURES }, () => normal()));
+    const parts = outputs.map((y, k) => y.map((v) => v * weights[top[k]]));
+    const total = parts[0].map((_, i) => parts.reduce((a, p) => a + p[i], 0));
+    const all = [...outputs.flat(), ...parts.flat(), ...total];
+    const lo = Math.min(...all);
+    const hi = Math.max(...all);
+    const ticks = [0, 8, 16, MOE_FEATURES - 1];
+    parts.forEach((p, k) => {
+      const e = top[k];
+      cParts[k].root.querySelector('figcaption')?.remove();
+      const caption = el('figcaption', { textContent: `${pct(weights[e])} × E${e}'s output` });
+      caption.append(el('span', { textContent: `outlines: E${e}'s output before scaling` }));
+      cParts[k].root.prepend(caption);
+      cParts[k].draw({
+        values: p, ghost: outputs[k], lo, hi, ticks, tickLabel: String,
+        describe: (i) => `feature ${i} · ${weights[e].toFixed(3)} × ${outputs[k][i].toFixed(2)} = ${p[i].toFixed(2)}`,
+      });
+    });
+    cSum.draw({
+      values: total, ghost: parts[0], lo, hi, ticks, tickLabel: String,
+      describe: (i) => `feature ${i} · ${parts.map((p) => p[i].toFixed(2)).join(' + ')} = ${total[i].toFixed(2)}`,
+    });
+  }
+  another.addEventListener('click', () => {
+    seed++;
+    update();
+  });
+  update();
+  ({ router: sRouter, dispatch: sDispatch, combine: sCombine })[focus].scrollIntoView({ block: 'center' });
 }
 
 // ---------------------------------------------------------------------------------------------

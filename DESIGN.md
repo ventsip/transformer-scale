@@ -59,6 +59,10 @@
   probabilities as a sequential heatmap, and the selected query's weights over the keys (click a row). A note gives the
   real cost of the current pass: the T × T grids eager attention allocates, which fused kernels never write, or in decode
   the single row against the whole cache.
+- **Mixture of experts** (opened from the router ops, any `gather (E…)`, or `index_add` / the expanded `× weight`):
+  one illustrative token's router logits, softmax with the top 2 kept and their renormalized weights; the tokens each
+  expert receives in this layer and pass, from the same seeded routing the scene draws (or the 2 experts the new token
+  uses, in decode); and the combine, two weighted expert outputs summing to m.
 
 ## Attention heads
 
