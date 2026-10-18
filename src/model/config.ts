@@ -31,6 +31,22 @@ export const LLAMA_3_8B: ModelConfig = {
   rmsNormEps: 1e-5,
 };
 
+// https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/config.json (gated; checked against the public mirror
+// NousResearch/Meta-Llama-3-70B). Same architecture as 8B: twice the width, 2.5× the layers, the same 8 KV heads.
+export const LLAMA_3_70B: ModelConfig = {
+  name: 'Llama-3-70B',
+  vocabSize: 128256,
+  dModel: 8192,
+  nLayers: 80,
+  nHeads: 64,
+  nKvHeads: 8,
+  headDim: 128,
+  dFfn: 28672,
+  maxContext: 8192,
+  ropeTheta: 500000,
+  rmsNormEps: 1e-5,
+};
+
 // https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/blob/main/config.json
 export const MIXTRAL_8X7B: ModelConfig = {
   name: 'Mixtral-8x7B',
@@ -47,9 +63,10 @@ export const MIXTRAL_8X7B: ModelConfig = {
   moe: { nExperts: 8, topK: 2 },
 };
 
-export type ModelId = 'llama-3-8b' | 'mixtral-8x7b';
+export type ModelId = 'llama-3-8b' | 'llama-3-70b' | 'mixtral-8x7b';
 
 export const MODELS: Record<ModelId, ModelConfig> = {
   'llama-3-8b': LLAMA_3_8B,
+  'llama-3-70b': LLAMA_3_70B,
   'mixtral-8x7b': MIXTRAL_8X7B,
 };

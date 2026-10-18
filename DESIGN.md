@@ -170,7 +170,9 @@
 
 ## Scope
 
-- Models: Llama-3-8B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
+- Models: Llama-3-8B, Llama-3-70B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
+  Llama-3-70B is 8B scaled up (twice the width, 80 layers) with the same 8 KV heads: weights grow 8.8×, the KV cache
+  per token 2.5× (128 → 320 KiB).
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then
   sampled on a floor of their own as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
 - Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
