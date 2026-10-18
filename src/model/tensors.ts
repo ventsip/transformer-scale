@@ -569,28 +569,28 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       expertTokens.push(moe(l, h, hNorm));
       continue;
     }
+    // Laid out like one expert of a mixture of experts (see moe): gate and up projections read the same rows, so their
+    // weights lie back to back in one station with g and u stacked in front; then the down projection with a and m.
     const wg = weight('mlp.gate_proj.weight', dModel, ffn);
-    const g = act('g', 'g = h_norm · W_gate', ffn);
-    matmul(hNorm, wg, g, dModel, ffn);
-    next();
     const wu = weight('mlp.up_proj.weight', dModel, ffn);
-    const u = act('u', 'u = h_norm · W_up', ffn);
+    const g = stacked('g', 'g = h_norm · W_gate', ffn, o.actDtype, TRANSIENT);
+    matmul(hNorm, wg, g, dModel, ffn);
+    const u = stacked('u', 'u = h_norm · W_up', ffn, o.actDtype, TRANSIENT);
     matmul(hNorm, wu, u, dModel, ffn);
     next();
+    const wd = weight('mlp.down_proj.weight', ffn, dModel);
     let a: string;
     if (o.elementwise === 'expanded') {
       // HF: act_fn(gate_proj(x)) * up_proj(x): SiLU(g) is its own tensor before the product.
-      const sg = act('silu_g', 'SiLU(g)', ffn);
+      const sg = stacked('silu_g', 'SiLU(g)', ffn, o.actDtype, TRANSIENT);
       op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise: a full T × d_ffn tensor of its own.');
       a = stacked('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, TRANSIENT);
       op('⊙', [sg, u], a, 'Elementwise product with u: the SwiGLU gate.');
     } else {
-      a = act('a', 'a = SiLU(g) ⊙ u', ffn);
+      a = stacked('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, TRANSIENT);
       op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.');
     }
-    next();
-    const wd = weight('mlp.down_proj.weight', ffn, dModel);
-    const m = act('m', 'm = a · W_down', dModel);
+    const m = stacked('m', 'm = a · W_down', dModel, o.actDtype, TRANSIENT);
     matmul(a, wd, m, ffn, dModel);
     op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");
   }
