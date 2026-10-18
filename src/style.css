@@ -466,3 +466,34 @@ button.play {
   stroke: #f5a524;
   stroke-width: 2;
 }
+
+/* Attention heatmaps. */
+.op-chart.heatmap svg {
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.op-chart .hatch {
+  stroke: #475569;
+  stroke-width: 2;
+}
+
+.op-chart .cell {
+  stroke: none;
+}
+
+.op-chart .row-outline {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.op-chart .tick.selected {
+  fill: var(--text);
+  font-weight: 600;
+}
+
+.op-popup-control input[type='checkbox'] {
+  flex: none;
+}

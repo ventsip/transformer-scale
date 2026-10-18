@@ -13,7 +13,7 @@ import {
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, maxTokens, type Settings } from './ui/controls';
-import { setPopupModel } from './ui/opPopup';
+import { setPopupContext } from './ui/opPopup';
 
 const params = new URLSearchParams(location.search);
 // ?model=mixtral-8x7b opens with that model.
@@ -116,7 +116,7 @@ function rebuild() {
   specs = model.tensors;
   stats = summarize(model, cfg);
   expertTokens = model.expertTokens;
-  setPopupModel(cfg);
+  setPopupContext(cfg, settings);
   const layout = layoutTensors(specs, settings);
   placed = layout.placed;
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));

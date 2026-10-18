@@ -1,11 +1,15 @@
+import { formatBytes } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
-import type { OpSpec } from '../model/tensors';
+import type { Mode, OpSpec } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
 let model: ModelConfig = LLAMA_3_8B;
+/** The pass being drawn: popups quote its real sizes next to their illustrations. */
+let pass: { mode: Mode; T: number } = { mode: 'prefill', T: 2048 };
 
-export function setPopupModel(cfg: ModelConfig): void {
+export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number }): void {
   model = cfg;
+  pass = { mode: current.mode, T: current.T };
 }
 
 /** The stages of the sampling panel, in pipeline order. */
@@ -29,6 +33,21 @@ type GluStage = 'silu' | 'gate';
 function swigluStage(op: OpSpec): GluStage | null {
   if (op.label === 'SiLU ⊙' || op.label === 'SiLU') return 'silu';
   if (op.label === '⊙') return 'gate';
+  return null;
+}
+
+/** The stages of the attention panel. */
+type AttnStage = 'scores' | 'softmax' | 'output';
+
+/**
+ * Attention ops, by output: eager repeat_kv copies, the causal mask, raw and masked scores, softmax and its cast
+ * (`probs` only on layer floors: the LM head's sampling probabilities share the id), and attn (fused, or eager · V).
+ */
+function attnStage(op: OpSpec): AttnStage | null {
+  const out = op.output.split(':')[1];
+  if (['k_rep', 'v_rep', 'causal_mask', 'scores', 'scores_masked'].includes(out)) return 'scores';
+  if (out === 'probs_fp32' || (out === 'probs' && op.floor >= 1 && op.floor <= model.nLayers)) return 'softmax';
+  if (out === 'attn') return op.label === 'attention' ? 'scores' : 'output';
   return null;
 }
 
@@ -63,6 +82,8 @@ function normStage(op: OpSpec): NormStage | null {
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
   const sampling = samplingStage(op);
   if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
+  const attn = attnStage(op);
+  if (attn) return { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body) => attentionViz(body, attn) };
   const rope = ropeStage(op);
   if (rope) return { title: 'RoPE: rotary position embedding', render: (body) => ropeViz(body, rope) };
   const norm = normStage(op);
@@ -576,6 +597,222 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   sRel.append(fRel);
 
   (focus === 'freq' ? sFreq : sRot).scrollIntoView({ block: 'center' });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attention: softmax(QKᵀ/√d + mask) · V for one head
+
+const ATTN_TOKENS = ['<bos>', 'The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'it', 'was', 'tired', '.'];
+/** A token for innerHTML: <bos> would otherwise be parsed as a tag. */
+const tokenHtml = (i: number) => ATTN_TOKENS[i].replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * Illustrative scaled scores of one head (queries × keys), with patterns real heads show: a sink on the first token,
+ * a pull toward the previous token, and a few content links ("it" → "cat"). Computed for the full square, as eager
+ * attention does; the causal mask removes the upper half.
+ */
+function illustrativeScores(): number[][] {
+  const rand = rng(3);
+  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const links: Record<string, number> = { '8,2': 4.5, '10,2': 3, '9,8': 2, '3,2': 2, '6,4': 1.5, '11,10': 1, '7,3': 1.2 };
+  return ATTN_TOKENS.map((_, i) => ATTN_TOKENS.map((_, j) =>
+    0.6 * normal() + (j === 0 ? 3 : 0) + (j === i ? 1 : 0) + (j === i - 1 ? 1.5 : 0) + (links[`${i},${j}`] ?? 0)));
+}
+
+/** Linear interpolation between two hex colors. */
+function mix(a: string, b: string, t: number): string {
+  const p = (h: string) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16));
+  const [ca, cb] = [p(a), p(b)];
+  return `rgb(${ca.map((v, k) => Math.round(v + (cb[k] - v) * Math.max(0, Math.min(1, t)))).join(',')})`;
+}
+
+/** Diverging for scores: blue below 0, neutral gray at 0, orange above. */
+const scoreColor = (v: number, max: number) => (v < 0 ? mix('#334155', '#60a5fa', -v / max) : mix('#334155', '#f5a524', v / max));
+/** Sequential for probabilities: dark at 0, bright at the maximum. */
+const probColor = (p: number, max: number) => mix('#1e293b', '#fbbf24', Math.sqrt(p / max));
+
+interface HeatmapDraw {
+  value: (i: number, j: number) => number;
+  color: (v: number) => string;
+  masked: (i: number, j: number) => boolean;
+  selected: number;
+  describe: (i: number, j: number) => string;
+  /** Legend: a gradient from lo to hi. */
+  legend: { lo: number; hi: number; label: string; format: (v: number) => string };
+}
+
+/** A queries × keys heatmap with token labels, hatched masked cells, a selectable query row and hover tooltips. */
+function heatmap(onSelect: (row: number) => void) {
+  const n = ATTN_TOKENS.length;
+  const cell = 30;
+  const left = 70;
+  const top = 58;
+  const W = left + n * cell + 8;
+  const H = top + n * cell + 34;
+  const root = el('figure', { className: 'op-chart heatmap' });
+  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Queries by keys' });
+  const tip = el('div', { className: 'op-chart-tip' });
+  tip.hidden = true;
+  root.append(plot, tip);
+
+  function draw(d: HeatmapDraw) {
+    plot.replaceChildren();
+    const defs = svg('defs');
+    const pattern = svg('pattern', { id: 'hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+    pattern.append(svg('line', { x1: 0, y1: 0, x2: 0, y2: 6, class: 'hatch' }));
+    defs.append(pattern);
+    plot.append(defs);
+    const keysLabel = svg('text', { x: left + (n * cell) / 2, y: 10, class: 'tick', 'text-anchor': 'middle' });
+    keysLabel.textContent = 'keys →';
+    const queriesLabel = svg('text', { x: 4, y: top - 6, class: 'tick' });
+    queriesLabel.textContent = 'queries ↓';
+    plot.append(keysLabel, queriesLabel);
+    ATTN_TOKENS.forEach((tok, k) => {
+      const col = svg('text', { x: left + k * cell + cell / 2, y: top - 6, class: 'tick', 'text-anchor': 'start', transform: `rotate(-45 ${left + k * cell + cell / 2} ${top - 6})` });
+      col.textContent = tok;
+      const row = svg('text', { x: left - 6, y: top + k * cell + cell / 2 + 3, class: k === d.selected ? 'tick selected' : 'tick', 'text-anchor': 'end' });
+      row.textContent = tok;
+      plot.append(col, row);
+    });
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const x = left + j * cell;
+        const y = top + i * cell;
+        const masked = d.masked(i, j);
+        plot.append(svg('rect', { x: x + 1, y: y + 1, width: cell - 2, height: cell - 2, rx: 3, fill: masked ? 'url(#hatch)' : d.color(d.value(i, j)), class: 'cell' }));
+        const hit = svg('rect', { x, y, width: cell, height: cell, class: 'hit' });
+        hit.addEventListener('pointerenter', () => {
+          tip.textContent = d.describe(i, j);
+          tip.hidden = false;
+          tip.style.left = `${((x + cell / 2) / W) * 100}%`;
+          tip.style.top = `${((y - 4) / H) * 100}%`;
+        });
+        hit.addEventListener('pointerleave', () => (tip.hidden = true));
+        hit.addEventListener('click', () => onSelect(i));
+        plot.append(hit);
+      }
+    }
+    plot.append(svg('rect', { x: left, y: top + d.selected * cell, width: n * cell, height: cell, rx: 4, class: 'row-outline' }));
+
+    // Legend: a gradient strip with its ends labeled.
+    const ly = top + n * cell + 12;
+    const lw = 160;
+    const grad = svg('linearGradient', { id: `g-${d.legend.label.length}-${d.legend.hi}` });
+    for (let s = 0; s <= 10; s++) {
+      grad.append(svg('stop', { offset: `${s * 10}%`, 'stop-color': d.color(d.legend.lo + ((d.legend.hi - d.legend.lo) * s) / 10) }));
+    }
+    defs.append(grad);
+    plot.append(svg('rect', { x: left, y: ly, width: lw, height: 8, rx: 2, fill: `url(#${grad.id})` }));
+    const lo = svg('text', { x: left, y: ly + 20, class: 'tick' });
+    lo.textContent = d.legend.format(d.legend.lo);
+    const hi = svg('text', { x: left + lw, y: ly + 20, class: 'tick', 'text-anchor': 'end' });
+    hi.textContent = d.legend.format(d.legend.hi);
+    const name = svg('text', { x: left + lw + 10, y: ly + 8, class: 'tick' });
+    name.textContent = d.legend.label;
+    plot.append(svg('rect', { x: left + lw + 150, y: ly - 1, width: 10, height: 10, rx: 2, fill: 'url(#hatch)', class: 'cell' }));
+    const maskName = svg('text', { x: left + lw + 164, y: ly + 8, class: 'tick' });
+    maskName.textContent = 'masked';
+    plot.append(lo, hi, name, maskName);
+  }
+  return { root, draw };
+}
+
+function attentionViz(body: HTMLElement, focus: AttnStage): void {
+  const n = ATTN_TOKENS.length;
+  const raw = illustrativeScores();
+  const perGroup = model.nHeads / model.nKvHeads;
+  let selected = 8; // "it"
+  let causal = true;
+
+  // 1. Scores.
+  const sScores = stageSection(body, focus === 'scores', 'QKᵀ / √d: every query against every key',
+    `One head of ${model.nHeads}: query i's score for key j is q_i · k_j / √${model.headDim}. Illustrative values for ` +
+    `${n} tokens, with patterns real heads show: a sink on the first token, the previous token, and "it" → "cat".`);
+  const maskRow = el('label', { className: 'op-popup-control' });
+  const maskBox = el('input', { type: 'checkbox', checked: true });
+  maskRow.append(maskBox, el('span', { textContent: 'Causal mask: a query may not see later keys (−∞ before softmax)' }));
+  const hScores = heatmap((i) => select(i));
+  const fScores = el('div', { className: 'op-popup-facts' });
+  sScores.append(maskRow, hScores.root, fScores);
+
+  // 2. Softmax.
+  const sSoft = stageSection(body, focus === 'softmax', 'softmax over keys, row by row',
+    'Each query row becomes probabilities that sum to 1; masked keys get exactly 0. Click a row to follow that query.');
+  const hProbs = heatmap((i) => select(i));
+  sSoft.append(hProbs.root);
+
+  // 3. Output.
+  const sOut = stageSection(body, focus === 'output', '· V: a weighted mix of value rows',
+    'The output of a query is the probability-weighted sum of the V rows of the keys it attends to.');
+  const cRow = barChart('', '');
+  const fOut = el('div', { className: 'op-popup-facts' });
+  sOut.append(cRow.root, fOut);
+
+  // The real sizes of this pass.
+  const fCost = el('div', { className: 'op-popup-facts' });
+  body.append(fCost);
+  const T = pass.T;
+  const decode = pass.mode === 'decode';
+  const scoreBytes = model.nHeads * (decode ? T + 1 : T * T) * 2;
+  fCost.innerHTML = decode
+    ? `In this decode step the grid is a single row: the new token (position ${T.toLocaleString('en-US')}) against all ` +
+      `<b>${(T + 1).toLocaleString('en-US')}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`
+    : `At T = <b>${T.toLocaleString('en-US')}</b> each head's grid is ${T.toLocaleString('en-US')} × ${T.toLocaleString('en-US')}: ` +
+      `<b>${formatBytes(scoreBytes)}</b> per layer for ${model.nHeads} heads in bf16, and eager attention allocates it several times ` +
+      '(scores, masked, fp32 softmax, cast). Fused kernels (FlashAttention / SDPA) never write it: they stream key blocks ' +
+      `and keep a running softmax. Grouped-query attention: this head shares its K and V with ${perGroup - 1} other query heads.`;
+
+  function probsOf(i: number): number[] {
+    const row = raw[i].map((v, j) => (causal && j > i ? -Infinity : v));
+    const m = Math.max(...row);
+    const e = row.map((v) => Math.exp(v - m));
+    const s = e.reduce((a, b) => a + b, 0);
+    return e.map((v) => v / s);
+  }
+
+  function select(i: number) {
+    selected = i;
+    update();
+  }
+
+  function update() {
+    const probs = raw.map((_, i) => probsOf(i));
+    const isMasked = (i: number, j: number) => causal && j > i;
+    const maxAbs = Math.max(...raw.flat().map(Math.abs));
+    hScores.draw({
+      value: (i, j) => raw[i][j], color: (v) => scoreColor(v, maxAbs), masked: isMasked, selected,
+      describe: (i, j) => `${ATTN_TOKENS[i]} → ${ATTN_TOKENS[j]} · score ${raw[i][j].toFixed(2)}${isMasked(i, j) ? ' · masked: −∞' : ''}`,
+      legend: { lo: -maxAbs, hi: maxAbs, label: 'score', format: (v) => v.toFixed(1) },
+    });
+    fScores.innerHTML = causal
+      ? `<b>${(n * (n - 1)) / 2}</b> of ${n * n} scores are masked. Eager attention still computes them, then adds −∞; ` +
+        'fused kernels skip those blocks, about half the work.'
+      : 'Without the mask, early tokens would read later ones: fine for an encoder, but a decoder generating left to ' +
+        'right cannot see the future, so training would leak the answer.';
+    const maxP = Math.max(...probs.flat());
+    hProbs.draw({
+      value: (i, j) => probs[i][j], color: (p) => probColor(p, maxP), masked: isMasked, selected,
+      describe: (i, j) => `${ATTN_TOKENS[i]} → ${ATTN_TOKENS[j]} · p = ${(100 * probs[i][j]).toFixed(1)}%`,
+      legend: { lo: 0, hi: maxP, label: 'probability', format: (p) => `${Math.round(100 * p)}%` },
+    });
+    const p = probs[selected];
+    cRow.draw({
+      values: p, lo: 0, hi: Math.max(...p), percent: true, ticks: ATTN_TOKENS.map((_, j) => j), tickLabel: (j) => ATTN_TOKENS[j],
+      removed: p.map((_, j) => isMasked(selected, j)),
+      describe: (j) => (isMasked(selected, j) ? `${ATTN_TOKENS[j]} · masked: 0` : `${ATTN_TOKENS[j]} · ${(100 * p[j]).toFixed(1)}% of its V row`),
+    });
+    const order = p.map((v, j) => [v, j]).sort((a, b) => b[0] - a[0]);
+    fOut.innerHTML =
+      `Query <b>${tokenHtml(selected)}</b> takes <b>${(100 * order[0][0]).toFixed(0)}%</b> of its output from ` +
+      `<b>${tokenHtml(order[0][1])}</b> and <b>${(100 * order[1][0]).toFixed(0)}%</b> from <b>${tokenHtml(order[1][1])}</b>. ` +
+      'The first token often soaks up attention a head does not need elsewhere: an "attention sink".';
+  }
+  maskBox.addEventListener('change', () => {
+    causal = maskBox.checked;
+    update();
+  });
+  update();
+  ({ scores: sScores, softmax: sSoft, output: sOut })[focus].scrollIntoView({ block: 'center' });
 }
 
 // ---------------------------------------------------------------------------------------------

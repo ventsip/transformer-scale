@@ -53,6 +53,12 @@
   model's RoPE base, head_dim and context): the wavelength of each of the 64 pairs on a log axis against the context
   length; dials for 8 pairs rotating with a position slider; and the score of identical q and k against their distance
   m − n (log axis), which shows that RoPE makes scores depend on distance only, decaying with ripples.
+- **Attention** (opened from fused `attention`, or any eager step: repeat_kv, the causal mask, QKᵀ/√d, + mask, softmax,
+  its cast, · V): one illustrative head over 12 tokens, with patterns real heads show (a sink on the first token, the
+  previous token, "it" → "cat"). Scores as a diverging heatmap with a causal-mask toggle (masked cells hatched), softmax
+  probabilities as a sequential heatmap, and the selected query's weights over the keys (click a row). A note gives the
+  real cost of the current pass: the T × T grids eager attention allocates, which fused kernels never write, or in decode
+  the single row against the whole cache.
 
 ## Attention heads
 
