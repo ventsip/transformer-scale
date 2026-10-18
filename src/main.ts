@@ -503,6 +503,13 @@ renderer.domElement.addEventListener('pointerleave', () => {
   tooltip.hidden = true;
 });
 
+// Hovering an op label lights all its pipes, in and out, and outlines the tensors at their ends.
+flow.onOpHover = (pipes) => {
+  flow.setHover(pipes);
+  const ids = new Set((pipes ?? []).flatMap((p) => p.tensors));
+  tensors.setHighlight([...ids].map(extentOf).filter((b): b is Box => b !== null));
+};
+
 // Click focuses a floor; double-click also flies to the element. The first click of a double-click
 // may change the focus and move floors, so the double-click reuses that click's pick by id.
 let downAt: { x: number; y: number } | null = null;

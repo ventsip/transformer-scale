@@ -31,6 +31,7 @@
 - **Hovering a pipe** turns it white, outlines the tensor at its end (the whole tensor) and lights the op label at the
   other; the tooltip names both ends and the bytes carried. Pipes are picked in screen space, within 6 px of the
   pointer or their own projected radius, since the thinnest are about a pixel wide; a block in front of a pipe wins.
+  Hovering an op label lights all its pipes, in and out, and outlines the tensors at their ends.
 - **The residual stream** (x, h and the adds between them) is drawn in cyan; reads that branch off it
   and branch outputs joining it keep their kind's color.
 - Flow is drawn for the focused floor, plus the op on the floor below that produces its input. An op whose output is

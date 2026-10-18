@@ -157,7 +157,9 @@ export class FlowScene {
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
   private readonly hoverMaterial = new THREE.MeshBasicMaterial({ color: HOVER_COLOR });
-  private hovered: Edge | null = null;
+  private hovered: Edge[] = [];
+  /** Called when the pointer enters an op label (with the op's pipes) and leaves it (with null). */
+  onOpHover?: (pipes: Edge[] | null) => void;
   private readonly projected = new THREE.Vector3();
   private readonly matrix = new THREE.Matrix4();
   private readonly point = new THREE.Vector3();
@@ -228,6 +230,8 @@ export class FlowScene {
         e.preventDefault();
         this.canvas.dispatchEvent(new WheelEvent('wheel', e));
       }, { passive: false });
+      div.addEventListener('pointerenter', () => this.onOpHover?.(this.pipesOf(div)));
+      div.addEventListener('pointerleave', () => this.onOpHover?.(null));
       const obj = new CSS2DObject(div);
       obj.position.copy(pos);
       this.group.add(obj);
@@ -344,18 +348,24 @@ Click for an interactive view.`;
     return best && { edge: best.edge, distance: best.point.distanceTo(camera.position) };
   }
 
-  /** Draws `edge` (or nothing, with null) as hovered: a bright pipe and a lit op label. */
-  setHover(edge: Edge | null): void {
-    if (this.hovered === edge) return;
-    if (this.hovered) {
-      this.hovered.tube.material = this.hovered.material;
-      this.hovered.label?.classList.remove('highlight');
+  /** Draws `edges` (or none, with null) as hovered: bright pipes and lit op labels. */
+  setHover(edges: Edge | Edge[] | null): void {
+    const next = edges === null ? [] : Array.isArray(edges) ? edges : [edges];
+    if (next.length === this.hovered.length && next.every((e, i) => e === this.hovered[i])) return;
+    for (const edge of this.hovered) {
+      edge.tube.material = edge.material;
+      edge.label?.classList.remove('highlight');
     }
-    this.hovered = edge;
-    if (edge) {
+    this.hovered = next;
+    for (const edge of next) {
       edge.tube.material = this.hoverMaterial;
       edge.label?.classList.add('highlight');
     }
+  }
+
+  /** The pipes into and out of an op: every pipe whose op end is the label `div`. */
+  pipesOf(div: HTMLElement): Edge[] {
+    return this.edges.filter((e) => e.label === div);
   }
 
   /** Flashes the generation loop: called once per decode step while generating. */
@@ -389,7 +399,7 @@ Click for an interactive view.`;
   }
 
   private clear(): void {
-    this.hovered = null;
+    this.hovered = [];
     for (const label of this.labels) this.group.remove(label);
     this.labels = [];
     for (const tube of this.tubes) {
