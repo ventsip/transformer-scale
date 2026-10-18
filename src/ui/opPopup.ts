@@ -1274,7 +1274,10 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
     cX.draw(series(x, (k) => `x = ${f(x[k])}`));
     fX.innerHTML = `RMS(x) = <b>${f(Math.sqrt(ms))}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
 
-    cSq.draw({ ...series(sq, (k) => `x² = ${f(sq[k])}`), refs: [{ value: ms, label: 'mean' }] });
+    // The outliers' squares dwarf the rest: the chart is scaled to the other features (and the mean), the outliers cut off.
+    const outlierAt = new Set(OUTLIERS.map(([i]) => outlierIndex(i, x.length)));
+    const typical = Math.max(ms, ...shown(sq.map((v, k) => (outlierAt.has(k) ? 0 : v))));
+    cSq.draw({ ...series(sq, (k) => `x² = ${f(sq[k])}`), hi: typical * CLIP_HEADROOM, clip: true, refs: [{ value: ms, label: 'mean' }] });
     fMean.innerHTML =
       `mean(x²) = <b>${f(ms)}</b>, ε = ${eps}, so 1/√(mean + ε) = <b>${f(r)}</b>. ` +
       `The two outliers contribute <b>${(100 * outlierShare).toFixed(0)}%</b> of the mean, from 2 of ${formatInt(x.length)} features: ` +
@@ -1427,7 +1430,14 @@ interface Draw {
   picked?: number | null;
   /** Tick labels as percentages. */
   percent?: boolean;
+  /** Cut off bars outside [lo, hi] at the chart's edge, marked with a break and their value, instead of overflowing. */
+  clip?: boolean;
 }
+
+/** Distance of a clipped bar's break mark from the chart's edge. */
+const CLIP_BREAK = 6;
+/** Room above the largest bar a clipped chart keeps in range. */
+const CLIP_HEADROOM = 1.15;
 
 /**
  * A single-series column chart in SVG, with optional outlines, removed columns, a marked column, reference lines and
@@ -1444,7 +1454,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
   }
   const { root, plot, tip } = chartFrame({ height: H, caption });
 
-  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], gap, yTick, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
+  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], gap, yTick, clip, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
     const x0 = pad.l;
     const band = (W - pad.l - pad.r) / values.length;
@@ -1481,7 +1491,16 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
         return;
       }
       const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : tone === 'weight' ? 'bar weight' : 'bar';
-      plot.append(column(cx, barW, y(0), y(v), cls));
+      const shownV = clip ? Math.max(lo, Math.min(hi, v)) : v;
+      plot.append(column(cx, barW, y(0), y(shownV), cls));
+      if (shownV !== v) {
+        // Cut off at the chart's edge: a break across the bar near its end, and the true value beside it.
+        const at = y(shownV) + (v > hi ? CLIP_BREAK : -CLIP_BREAK);
+        plot.append(svg('line', { x1: cx - barW / 2 - 2, x2: cx + barW / 2 + 2, y1: at + 2, y2: at - 2, class: 'clip-break' }));
+        const label = svg('text', { x: cx + barW / 2 + 3, y: y(shownV) + (v > hi ? 8 : -2), class: 'tick', 'text-anchor': 'start' });
+        label.textContent = yTick ? yTick(v) : tickText(v, step);
+        plot.append(label);
+      }
       // Outline on top, so it shows whether the bar is taller or shorter.
       if (ghost) plot.append(column(cx, barW, y(0), y(ghost[i]), 'ghost'));
       if (i === picked) {
