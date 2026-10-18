@@ -193,10 +193,18 @@
   `kv_b_proj` (512 → 16 × (128 + 128)) expands c_kv into each head's position-free K and its V. `cat` joins K with the
   shared key (192 per head); V is a view (128 per head), so the attention output and `o_proj` are 16 × 128 wide.
 - **MLA cache setting.** MLA exists to cache only c_kv and the RoPE key: 576 values per token per layer. HF does not:
-  it expands first and caches K and V, 5,120 values (270 KiB per token across 27 layers, against 30.4 KiB). "K, V
+  it expands first and caches K and V, 5,120 values (270 KiB per token across 27 layers, 324 KiB with padded V; against
+  30.4 KiB). "K, V
   expanded (HF)" is the default, true to the rest of the app; "Latent + RoPE key (vLLM, SGLang)" caches the latent and
   expands the whole cached latent every pass, as those engines do in prefill (in decode they fold `kv_b_proj` into
   the query and output projections instead, which the notes say rather than draw).
+- **True to DeepSeek's HF code** (`modeling_deepseek.py`, which the checkpoint runs with trust_remote_code; it has
+  only eager and FlashAttention-2 paths). Fused attention means FlashAttention-2, which needs one head width for Q, K
+  and V: V is zero-padded from 128 to 192 per head and cached padded (324 KiB per token, against 270 eager), and the
+  output is sliced back to 128 (a copy). Every attention layer has its own rotary module (`ropePerLayer`): its own
+  inv_freq and cos / sin tables, buffers kept between passes and covering every position so far, rebuilt in full
+  whenever the sequence grows (every decode step). They sit at the start of each layer's attention section, not on the
+  embedding floor. All 27 layers' attention is the same; only layer 0's MLP differs, labeled "Dense MLP".
 - **YaRN.** RoPE trained at 4K is stretched 40× to 160K: the slowest of the 32 frequencies are divided by 40, with a
   ramp from the fast ones that stay (`src/model/rope.ts`, used by the inv_freq note and the RoPE popup), and scores are
   scaled up by mscale² ≈ 1.59.

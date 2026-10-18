@@ -69,6 +69,7 @@ export class Tooltips {
       `<div>FLOPs for ${pass}: <b>${formatFlops(part.flops)}</b> (${pct(part.flops, sum((p) => p.flops))} of the layer)</div>`,
       `<div>Weights + KV read: <b>${formatBytes(part.bytesRead)}</b> (${pct(part.bytesRead, sum((p) => p.bytesRead))} of the layer)</div>`,
     );
+    if (part.note) rows.push(`<div class="tt-note">${part.note}</div>`);
     if (routed !== undefined) {
       rows.push(`<div class="tt-note">${part.idle ? 'No token is routed to this expert in this pass: its weights are not read.'
         : `${formatInt(routed)} ${routed === 1 ? 'token is' : 'tokens are'} routed to this expert in this pass.`}</div>`);

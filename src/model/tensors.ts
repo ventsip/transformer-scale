@@ -303,7 +303,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const pos = `${floor}:position_ids`;
   let cos = '';
   let sin = '';
-  if (!gpt2) {
+  const freq: OpViz = { panel: 'rope', stage: 'freq' };
+  if (!gpt2 && !cfg.ropePerLayer) {
     const theta = cfg.ropeTheta!;
     const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
     const freqs = ropeFrequencies(cfg);
@@ -316,7 +317,6 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         `Wavelengths 2π/θ_i run from ~${formatTokens(2 * Math.PI / freqs[0])} tokens to ~${formatTokens(2 * Math.PI / freqs[freqs.length - 1])} tokens.`,
     });
     next();
-    const freq: OpViz = { panel: 'rope', stage: 'freq' };
     for (const fn of ['cos', 'sin'] as const) {
       const table = act(fn, `${fn}(pos · θ): RoPE table`, headDim, { note: ropeNote });
       op(`${fn}(pos·θ)`, [pos, invFreq], table,
@@ -568,6 +568,33 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");
     return counts;
   };
+  /**
+   * DeepSeek-V2 (ropePerLayer): each attention layer's own rotary module, with inv_freq and cos / sin tables for every
+   * position seen so far. The tables are buffers kept between passes and rebuilt in full whenever the sequence grows,
+   * which in decode is every step; RoPE then gathers the rows of this pass's positions.
+   */
+  const layerRopeTables = () => {
+    const freqs = ropeFrequencies(cfg);
+    const positions: Dim = { name: decode ? 'positions so far' : 'T', size: keys };
+    const invFreq = push({
+      id: 'rotary_emb.inv_freq', label: `${prefix}self_attn.rotary_emb.inv_freq`, kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
+      note: `This layer's own copy of the RoPE frequencies, YaRN-adjusted: wavelengths from ~${formatTokens(2 * Math.PI / freqs[0])} ` +
+        `to ~${formatTokens(2 * Math.PI / freqs[freqs.length - 1])} tokens. Each attention layer builds its rotary module, and its tables, separately.`,
+    });
+    const tables = (['cos', 'sin'] as const).map((fn) => {
+      const table = push({
+        id: `rotary_emb.${fn}_cached`, label: `${prefix}self_attn.rotary_emb.${fn}_cached`, kind: 'buffer', x: headDim.size, z: keys,
+        rowGap: STACK_GAP, dims: [positions, headDim], dtype: o.actDtype,
+        note: `${fn}(pos · θ) for positions 0 … ${formatInt(keys - 1)}: a buffer kept between passes, one per layer (${cfg.nLayers} in all). ` +
+          'Rebuilt for every position whenever the sequence grows: in decode, every step.',
+      });
+      op(`${fn}(pos·θ)`, [invFreq], table,
+        `Outer product of positions 0 … ${formatInt(keys - 1)} and the frequencies, then ${fn === 'cos' ? 'cosine' : 'sine'}, the ${half.size} angles written twice. ` +
+        (decode ? 'The sequence grew by one, so the whole table is computed again.' : 'Computed in full on the first pass.'), { viz: freq });
+      return table;
+    });
+    return { cos: tables[0], sin: tables[1] };
+  };
   /** By decoder layer; dense layers have none. */
   const expertTokens: number[][] = [];
 
@@ -582,6 +609,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     next();
     const xNorm = norm(x, ['input_layernorm', 'ln_1'], 'x_norm', 'x');
     next();
+    if (cfg.ropePerLayer) {
+      ({ cos, sin } = layerRopeTables());
+      next();
+    }
     // Where K and V live afterwards:
     // - dynamic, prefill: the cache keeps K and V themselves;
     // - dynamic, decode: torch.cat copies the past cache plus the new row into a new tensor;
@@ -631,6 +662,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     let q: string;
     let kCached: string;
     let vCached: string;
+    /** V zero-padded to the Q and K head width (DeepSeek's FlashAttention path): the attention output is too. */
+    let vPadded = false;
     if (gpt2) {
       // One fused projection (c_attn, a Conv1D: x · W + b) yields Q, K and V side by side, as views of one [T × 3d]
       // tensor. Drawn as its three column blocks, each reading a third of the weight; position is already in x.
@@ -721,10 +754,22 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         kCached = kv.k;
         vCached = kv.v;
       } else {
-        const hfNote = ` HF caches K and V expanded: ${formatInt(kvDim.size + oDim.size)} values per token, against ${kvLoraRank + qkRopeDim} for the latent and RoPE key (see MLA cache).`;
-        const kv = expandKv(cKv, kPe, tok, { kind: kvKind, note: kvNote(hfNote) }, { kind: kvKind, note: kvNote('') });
+        // HF's FlashAttention path pads V to the Q and K head width before caching it; the eager path does not.
+        vPadded = o.attention === 'fused';
+        const vCachedWidth = vPadded ? kvDim : oDim;
+        const hfNote = ` HF caches K and V expanded: ${formatInt(kvDim.size + vCachedWidth.size)} values per token, against ${kvLoraRank + qkRopeDim} for the latent and RoPE key (see MLA cache).`;
+        const kv = expandKv(cKv, kPe, tok, { kind: kvKind, note: kvNote(hfNote) }, vPadded ? {} : { kind: kvKind, note: kvNote('') });
         kCached = cacheWrite(kv.k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
-        vCached = cacheWrite(kv.v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', oDim);
+        let v = kv.v;
+        if (vPadded) {
+          v = act('v_pad', `V zero-padded to ${cfg.headDim} per head`, kvDim, {
+            heads: kvHeads, rowGap: STACK_GAP, kind: kvKind,
+            note: kvNote(` ${cfg.headDim - vHead} of each head's ${cfg.headDim} columns are zeros, cached too: a third of the V cache holds nothing.`),
+          });
+          op('pad', [kv.v], v, `F.pad appends ${cfg.headDim - vHead} zeros to each head's ${vHead}-dim V: FlashAttention needs one head width for Q, K and V. ` +
+            'The cache stores the padding too. Eager attention skips this.');
+        }
+        vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', vCachedWidth);
       }
       next();
     } else {
@@ -756,7 +801,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     // QKᵀ and ·V are 2 FLOPs per multiply-add each. In prefill the causal mask lets fused kernels skip
     // key > query; a decode query attends to every cached key.
     const qkFlops = 2 * n * keys * cfg.nHeads * cfg.headDim;
-    const pvFlops = 2 * n * keys * cfg.nHeads * vHeadDim(cfg);
+    const pvFlops = 2 * n * keys * cfg.nHeads * (vPadded ? cfg.headDim : vHeadDim(cfg));
     const attnFlops = qkFlops + pvFlops;
     // YaRN raises the softmax temperature to match the stretched positions.
     const scoreScale = yarnScoreScale(cfg);
@@ -806,13 +851,21 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       op('· V', [probs, vRep], attn, `Per head: probability-weighted sum of V rows. ${formatFlops(pvFlops)} FLOPs.`,
         { flops: pvFlops, viz: { panel: 'attention', stage: 'output' } });
     } else {
-      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads });
-      op('attention', [q, kCached, vCached], attn,
+      // With padded V the kernel writes each head's output padded too; a slice then drops the zeros (a copy).
+      const out = vPadded
+        ? act('attn_pad', `softmax(QKᵀ/√d) · V, padded to ${cfg.headDim} per head`, qDim, { heads: qHeads })
+        : act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads });
+      attn = out;
+      op('attention', [q, kCached, vCached], out,
         'softmax(QKᵀ/√d)·V per head, fused (FlashAttention / SDPA): no repeat_kv copies, no mask tensor, and the scores never reach memory. ' +
         (decode
           ? `The new token attends to all ${formatInt(keys)} cached keys: ${formatFlops(attnFlops)} FLOPs, reading the whole K and V cache.`
           : `Causal: query i only attends to keys 0..i, so ~${formatFlops(usefulFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`) +
-        scaleNote + staticNote, { flops: usefulFlops, ...SCORES });
+        scaleNote + staticNote + (vPadded ? ` V is padded, so a third of the · V work multiplies zeros.` : ''), { flops: usefulFlops, ...SCORES });
+      if (vPadded) {
+        attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads, rowGap: STACK_GAP });
+        op('slice', [out], attn, `Keeps the first ${vHeadDim(cfg)} of each head's ${cfg.headDim} output columns; reshape copies them into one ${oDim.size}-wide tensor.`);
+      }
     }
     next();
     const wo = weight(gpt2 ? 'attn.c_proj.weight' : 'self_attn.o_proj.weight', oDim, dModel, undefined, { heads: qHeads });

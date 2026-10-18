@@ -29,6 +29,11 @@ export interface ModelConfig {
   yarn?: YarnConfig;
   /** RoPE rotates neighboring dims (2i, 2i+1) together, instead of HF rotate_half's i and i + d/2 (DeepSeek-V2). */
   ropeInterleaved?: boolean;
+  /**
+   * Each attention layer has its own rotary module and cos / sin tables, instead of one set computed per pass for all
+   * layers (DeepSeek-V2's modeling code).
+   */
+  ropePerLayer?: boolean;
 }
 
 /** Each token runs through `topK` of `nExperts` experts (and, if any, the shared experts). */
@@ -161,6 +166,7 @@ export const DEEPSEEK_V2_LITE: ModelConfig = {
   },
   mla: { kvLoraRank: 512, qkNopeDim: 128, qkRopeDim: 64, vDim: 128 },
   ropeInterleaved: true,
+  ropePerLayer: true,
   yarn: { factor: 40, originalContext: 4096, betaFast: 32, betaSlow: 1, mscale: 0.707, mscaleAllDim: 0.707 },
 };
 

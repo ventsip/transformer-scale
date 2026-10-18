@@ -24,6 +24,8 @@ export interface Part {
   bytesRead: number;
   /** An expert no token is routed to in this pass. */
   idle?: boolean;
+  /** A sentence for its tooltip. */
+  note?: string;
 }
 
 /**
@@ -60,7 +62,15 @@ export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[
   };
 
   const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION))];
-  if (!cfg.moe || !isMoeLayer(cfg, floorLayer(floor))) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
+  if (!cfg.moe) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
+  if (!isMoeLayer(cfg, floorLayer(floor))) {
+    // A mixture-of-experts model whose first layers keep a dense MLP.
+    const dense = part('mlp', 'Dense MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION));
+    const n = cfg.moe.denseLayers;
+    dense.note = `Dense: the first ${n === 1 ? 'layer keeps' : `${n} layers keep`} one MLP in place of the router and experts ` +
+      `(first_k_dense_replace = ${n}); every later layer routes through experts.`;
+    return [...parts, dense];
+  }
   const router = part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION && !s.shared));
   router.extentIds = onFloor.filter((s) => s.section === MLP_SECTION).map((s) => s.id);
   parts.push(router);
