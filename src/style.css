@@ -504,3 +504,39 @@ button.play {
   background: #f8fafc;
   border-color: #f8fafc;
 }
+
+/* Embedding lookup diagram. */
+.op-chart .table {
+  fill: #1e3a5f;
+  stroke: #4f8ff7;
+  stroke-width: 1;
+}
+
+.op-chart .link {
+  fill: none;
+  stroke: #475569;
+  stroke-width: 1;
+}
+
+.op-chart .link.on {
+  stroke: #f5a524;
+  stroke-width: 2;
+}
+
+.op-chart .row {
+  stroke: #9cc2ff;
+  stroke-width: 1;
+}
+
+.op-chart .row.on {
+  stroke: #f5a524;
+  stroke-width: 3;
+}
+
+.op-chart .xrow {
+  fill: #3f3424;
+}
+
+.op-chart .xrow.on {
+  fill: #f5a524;
+}

@@ -1,16 +1,17 @@
 import { formatBytes } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
+import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
 import type { Mode, OpSpec } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
 let model: ModelConfig = LLAMA_3_8B;
 /** The pass being drawn: popups quote its real sizes next to their illustrations. */
-let pass: { mode: Mode; T: number } = { mode: 'prefill', T: 2048 };
+let pass: { mode: Mode; T: number; weightDtype: DType } = { mode: 'prefill', T: 2048, weightDtype: 'bf16' };
 
-export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number }): void {
+export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number; weightDtype: DType }): void {
   model = cfg;
-  pass = { mode: current.mode, T: current.T };
+  pass = { mode: current.mode, T: current.T, weightDtype: current.weightDtype };
 }
 
 /** The stages of the sampling panel, in pipeline order. */
@@ -93,6 +94,7 @@ function normStage(op: OpSpec): NormStage | null {
 
 /** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
+  if (op.label === 'lookup') return { title: 'Embedding lookup: token ids select rows', render: lookupViz };
   const sampling = samplingStage(op);
   if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
   const moe = moeStage(op);
@@ -733,6 +735,137 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   });
   update();
   ({ router: sRouter, dispatch: sDispatch, combine: sCombine })[focus].scrollIntoView({ block: 'center' });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Embedding lookup: each token id selects one row of the table
+
+const LOOKUP_WORDS = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'the', 'mat', 'was', 'warm'];
+/** Features of the selected row shown as bars. */
+const ROW_FEATURES = 48;
+
+/**
+ * The prompt as (token, id) pairs. The beginning-of-text ids are the real ones (Llama 3: 128000, Mixtral: 1);
+ * the others are illustrative, derived from the word so that repeated words share an id, as they do in a tokenizer.
+ */
+function lookupTokens(): { text: string; id: number }[] {
+  const bos = model.vocabSize > 100000 ? { text: '<|begin_of_text|>', id: 128000 } : { text: '<s>', id: 1 };
+  const hash = (w: string) => [...w].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
+  return [bos, ...LOOKUP_WORDS.map((w) => ({ text: w, id: 1000 + (hash(w) % (Math.min(model.vocabSize, 100000) - 2000)) }))];
+}
+
+function lookupViz(body: HTMLElement): void {
+  const toks = lookupTokens();
+  const n = toks.length;
+  const V = model.vocabSize;
+  let selected = 2; // "cat"
+
+  // 1. Token ids → rows → x.
+  const sRows = stageSection(body, true, 'Token ids select rows of embed_tokens',
+    `The table has one row of ${model.dModel.toLocaleString('en-US')} numbers per vocabulary entry (${V.toLocaleString('en-US')} rows). ` +
+    "Each token id picks its row, which is copied into x: no multiplication, just indexing. Hover a token to follow it.");
+  const W = 560;
+  const rowH = 22;
+  const top = 26;
+  const H = top + n * rowH + 10;
+  const table = { x: 250, w: 44, y: top, h: n * rowH - 4 };
+  const diagram = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Token ids indexing rows of the embedding table' });
+  const fig = el('figure', { className: 'op-chart' });
+  fig.append(diagram);
+  const fRows = el('div', { className: 'op-popup-facts' });
+  sRows.append(fig, fRows);
+
+  // 2. The selected row.
+  const sRow = stageSection(body, false, 'One row: a token\'s embedding',
+    `Illustrative values for the first ${ROW_FEATURES} of ${model.dModel.toLocaleString('en-US')} features. Learned in training; ` +
+    'the same token always gets the same row, whatever its position (RoPE adds position later, inside attention).');
+  const cRow = barChart('', '', 'weight');
+  sRow.append(cRow.root);
+
+  // The real cost in this pass.
+  const fCost = el('div', { className: 'op-popup-facts' });
+  body.append(fCost);
+  const wb = DTYPES[pass.weightDtype].bytes;
+  const rowBytes = model.dModel * wb;
+  const tableBytes = V * rowBytes;
+  const rows = pass.mode === 'decode' ? 1 : pass.T;
+  fCost.innerHTML =
+    `In this pass: <b>${rows.toLocaleString('en-US')}</b> ${rows === 1 ? 'row' : 'rows'} × ${formatBytes(rowBytes)} = ` +
+    `<b>${formatBytes(rows * rowBytes)}</b> read from a <b>${formatBytes(tableBytes)}</b> table ` +
+    `(${((100 * rows * rowBytes) / tableBytes).toPrecision(2)}%), and <b>0</b> FLOPs. ` +
+    'The LM head at the top is the opposite: a full matrix multiply against a second table of the same shape ' +
+    '(not tied to this one in Llama 3 or Mixtral), scoring every vocabulary entry.';
+
+  const rowY = (id: number) => table.y + (id / V) * table.h;
+  const chipY = (i: number) => top + i * rowH + rowH / 2;
+
+  function draw() {
+    diagram.replaceChildren();
+    const heading = (x: number, text: string, anchor = 'start') => {
+      const t = svg('text', { x, y: 12, class: 'tick', 'text-anchor': anchor });
+      t.textContent = text;
+      diagram.append(t);
+    };
+    heading(4, 'tokens and ids');
+    heading(table.x + table.w / 2, `embed_tokens: ${V.toLocaleString('en-US')} rows`, 'middle');
+    heading(W - 4, 'x: one row per token', 'end');
+    diagram.append(svg('rect', { x: table.x, y: table.y, width: table.w, height: table.h, rx: 3, class: 'table' }));
+    const zero = svg('text', { x: table.x + table.w + 4, y: table.y + 8, class: 'tick' });
+    zero.textContent = '0';
+    const last = svg('text', { x: table.x + table.w + 4, y: table.y + table.h, class: 'tick' });
+    last.textContent = (V - 1).toLocaleString('en-US');
+    diagram.append(zero, last);
+
+    // Unselected first, so the selected path is drawn on top.
+    const order = [...toks.keys()].sort((a, b) => Number(a === selected) - Number(b === selected));
+    for (const i of order) {
+      const { text, id } = toks[i];
+      const on = toks[i].id === toks[selected].id;
+      const cls = on ? 'link on' : 'link';
+      const y = chipY(i);
+      const ry = rowY(id);
+      diagram.append(svg('path', { d: `M150,${y} C200,${y} 200,${ry} ${table.x},${ry}`, class: cls }));
+      diagram.append(svg('line', { x1: table.x, x2: table.x + table.w, y1: ry, y2: ry, class: on ? 'row on' : 'row' }));
+      diagram.append(svg('path', { d: `M${table.x + table.w},${ry} C${table.x + table.w + 50},${ry} 380,${y} 420,${y}`, class: cls }));
+      const label = svg('text', { x: 4, y: y + 4, class: on ? 'tick selected' : 'tick' });
+      label.textContent = text.length > 17 ? `${text.slice(0, 16)}…` : text;
+      const idText = svg('text', { x: 146, y: y + 4, class: on ? 'tick selected' : 'tick', 'text-anchor': 'end' });
+      idText.textContent = id.toLocaleString('en-US');
+      diagram.append(label, idText);
+      diagram.append(svg('rect', { x: 420, y: y - 6, width: W - 424, height: 12, rx: 2, class: on ? 'xrow on' : 'xrow' }));
+      const hit = svg('rect', { x: 0, y: y - rowH / 2, width: W, height: rowH, class: 'hit' });
+      hit.addEventListener('pointerenter', () => {
+        if (selected === i) return;
+        selected = i;
+        update();
+      });
+      diagram.append(hit);
+    }
+  }
+
+  function update() {
+    draw();
+    const { text, id } = toks[selected];
+    const same = toks.filter((t) => t.id === id).length;
+    const unique = new Set(toks.map((t) => t.id)).size;
+    fRows.innerHTML =
+      `<b>${text.replace(/</g, '&lt;')}</b> is id <b>${id.toLocaleString('en-US')}</b>` +
+      (same > 1 ? `; it appears ${same === 2 ? 'twice' : `${same} times`}, and each copy reads the same row.` : '.') +
+      ` These ${n} tokens read <b>${unique}</b> distinct rows. "The" and "the" are different tokens.` +
+      ' Ids other than the first are illustrative.';
+    const rand = rng(id);
+    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    // Embedding entries are small numbers, a few hundredths.
+    const values = Array.from({ length: ROW_FEATURES }, () => 0.02 * normal());
+    const span = Math.max(...values.map(Math.abs));
+    cRow.root.querySelector('figcaption')?.remove();
+    cRow.root.prepend(el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` }));
+    cRow.draw({
+      values, lo: -span, hi: span, ticks: [0, 16, 32, ROW_FEATURES - 1], tickLabel: String,
+      describe: (i) => `feature ${i} · ${values[i].toFixed(4)}`,
+    });
+  }
+  update();
 }
 
 // ---------------------------------------------------------------------------------------------

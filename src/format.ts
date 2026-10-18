@@ -13,7 +13,8 @@ export function formatBytes(n: number): string {
     n /= 1024;
     i++;
   }
-  return `${i === 0 ? n : n.toPrecision(3)} ${UNITS[i]}`;
+  // 1,000–1,023 of a unit stay in that unit: toPrecision(3) would print them as 1.00e+3.
+  return `${i === 0 || n >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toPrecision(3)} ${UNITS[i]}`;
 }
 
 export const formatInt = (n: number) => n.toLocaleString('en-US');

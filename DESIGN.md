@@ -38,6 +38,11 @@
 
 ## Operation popups
 
+- **Embedding lookup** (opened from `lookup`): a 12-token prompt whose ids index rows of the table, drawn as a tall strip
+  (row 0 at the top), each row copied into x; hover a token to follow it. Repeated words share a row. The BOS ids are
+  real (Llama 3: 128000, Mixtral: 1), the rest illustrative. Below, the selected row's first 48 features, and the real
+  cost of the pass: rows read against the table size, with 0 FLOPs.
+
 - Clicking an op label that has an interactive view (accent border, pointer cursor) opens a popup explaining it.
 - **Sampling** (opened from any sampling op: to fp32, ÷ temperature, top-k / top-p, softmax, sample; the clicked step
   is highlighted): illustrative logits for the top 40 of 128,256 tokens, then each step with its controls and chart -
