@@ -571,8 +571,3 @@ button.play {
 .section-label.idle {
   opacity: 0.45;
 }
-
-.op-chart .clip-break {
-  stroke: var(--c-background);
-  stroke-width: 3;
-}

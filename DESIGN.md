@@ -71,8 +71,7 @@
 - **RMSNorm** (opened from `RMSNorm`, or any step of the expanded chain; identified by output id, since labels like
   `× weight` repeat elsewhere): one illustrative token of the full d_model, drawn by both ends, with two outlier
   features (fixed in size, so ordinary features stay readable) and a scale slider; x² with
-  its mean (scaled to the ordinary features: the outliers' bars are cut off at the top, with a break and their value),
-  the outliers' share of it and how much they shrink every other feature, and 1/√(mean + ε); x / RMS(x) against ±1 lines with x as outlines, which stays put as the slider scales x
+  its mean, the outliers' share of it and how much they shrink every other feature, and 1/√(mean + ε); x / RMS(x) against ±1 lines with x as outlines, which stays put as the slider scales x
   (until mean(x²) nears ε); then the learned weight and the output.
 - **GELU** (GPT-2, opened from `GELU`): the tanh approximation ("gelu_new") against a dashed ReLU, its minimum
   marked, and its largest gap to the exact x · Φ(x); one illustrative token's h_fc and a = GELU(h_fc), both ends of
