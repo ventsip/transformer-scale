@@ -54,7 +54,12 @@ export function openOpPopup(op: OpSpec): void {
 // ---------------------------------------------------------------------------------------------
 // Sampling: logits → ÷ temperature → top-k / top-p → softmax → sample
 
-const VOCAB = 128256;
+/** Vocabulary size of the current model. */
+let VOCAB = 128256;
+
+export function setVocabSize(n: number): void {
+  VOCAB = n;
+}
 const SHOWN = 40;
 
 /** Deterministic pseudo-random numbers, so the illustration is the same every time. */
@@ -120,7 +125,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   };
 
   // 1. Logits.
-  const sLogits = section('logits', 'logits (fp32)', 'The LM head scores every token in the vocabulary. Illustrative values; the top 40 of 128,256 shown, by rank.');
+  const sLogits = section('logits', 'logits (fp32)', `The LM head scores every token in the vocabulary. Illustrative values; the top ${SHOWN} of ${VOCAB.toLocaleString('en-US')} shown, by rank.`);
   const cLogits = barChart();
   sLogits.append(cLogits.root);
 

@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { formatBytes, formatCount, formatFlops, formatInt } from './format';
 import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type Box, type PlacedTensor } from './layout';
-import { LLAMA_3_8B } from './model/config';
+import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
 import {
@@ -13,11 +13,15 @@ import {
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, maxTokens, type Settings } from './ui/controls';
+import { setVocabSize } from './ui/opPopup';
 
-const cfg = LLAMA_3_8B;
-const FLOORS = floorCount(cfg);
+const params = new URLSearchParams(location.search);
+// ?model=mixtral-8x7b opens with that model.
+const initialModel = (params.get('model') ?? '') in MODELS ? (params.get('model') as ModelId) : 'llama-3-8b';
+let cfg = MODELS[initialModel];
 
 const settings: Settings = {
+  model: initialModel,
   mode: 'prefill',
   T: 2048,
   focusFloor: 1,
@@ -38,7 +42,7 @@ const settings: Settings = {
 // Renderers.
 const app = document.getElementById('app')!;
 // ?webgl forces the WebGL2 fallback (for testing, or where WebGPU misbehaves).
-const forceWebGL = new URLSearchParams(location.search).has('webgl');
+const forceWebGL = params.has('webgl');
 const renderer = new THREE.WebGPURenderer({ antialias: true, logarithmicDepthBuffer: true, forceWebGL });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -70,21 +74,32 @@ scene.add(tensors.group);
 const flow = new FlowScene((f) => floorName(cfg, f), renderer.domElement);
 scene.add(flow.group);
 
-// Floor labels.
-const floorLabels = Array.from({ length: FLOORS }, (_, f) => {
-  const div = document.createElement('div');
-  div.className = 'floor-label';
-  div.textContent = floorName(cfg, f);
-  const obj = new CSS2DObject(div);
-  obj.center.set(1, 0.5);
-  scene.add(obj);
-  return obj;
-});
+// Floor labels, recreated when the model changes.
+let floorLabels: CSS2DObject[] = [];
+
+function createFloorLabels() {
+  floorLabels.forEach((obj) => {
+    scene.remove(obj);
+    obj.element.remove();
+  });
+  floorLabels = Array.from({ length: floorCount(cfg) }, (_, f) => {
+    const div = document.createElement('div');
+    div.className = 'floor-label';
+    div.textContent = floorName(cfg, f);
+    const obj = new CSS2DObject(div);
+    obj.center.set(1, 0.5);
+    scene.add(obj);
+    return obj;
+  });
+}
+createFloorLabels();
 
 // State derived from settings.
 let specs: TensorSpec[] = [];
 let placed: PlacedTensor[] = [];
 let stats: Stats;
+/** Mixture of experts: tokens routed to each expert, per decoder layer. */
+let expertTokens: number[][] | undefined;
 
 /** Tensors on other floors that the focused floor's data flow links to. */
 let linked = new Set<string>();
@@ -97,7 +112,9 @@ const isVisible = (s: TensorSpec) =>
 function rebuild() {
   const model = buildModel(cfg, settings);
   specs = model.tensors;
-  stats = summarize(model);
+  stats = summarize(model, cfg);
+  expertTokens = model.expertTokens;
+  setVocabSize(cfg.vocabSize);
   placed = layoutTensors(specs, settings);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
@@ -235,29 +252,66 @@ function stepPlayback() {
 // UI.
 const panel = document.getElementById('panel')!;
 const statsEl = document.getElementById('stats')!;
-const ui = createControls(document.getElementById('controls')!, settings, {
-  maxT: cfg.maxContext,
-  floorCount: FLOORS,
-  floorName: (f) => floorName(cfg, f),
-  onChange: (key) => {
-    // Switching to decode: the cache plus the new token must still fit the context.
-    if (key === 'mode') {
-      settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
-      ui.refresh();
-    }
-    rebuild();
-  },
-  onOverview: () => overview(),
-  onFrameFocus: frameFocus,
-  onPlay: togglePlay,
-  isPlaying: () => playing,
-});
+const controlsEl = document.getElementById('controls')!;
+
+/** Builds the settings panel for the current model (its context length sets the token range). */
+const createUi = () => {
+  controlsEl.replaceChildren();
+  return createControls(controlsEl, settings, {
+    maxT: cfg.maxContext,
+    floorCount: floorCount(cfg),
+    floorName: (f) => floorName(cfg, f),
+    onChange: (key) => {
+      if (key === 'model') return switchModel();
+      // Switching to decode: the cache plus the new token must still fit the context.
+      if (key === 'mode') {
+        settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
+        ui.refresh();
+      }
+      rebuild();
+    },
+    onOverview: () => overview(),
+    onFrameFocus: frameFocus,
+    onPlay: togglePlay,
+    isPlaying: () => playing,
+  });
+};
+let ui = createUi();
+
+function switchModel() {
+  cfg = MODELS[settings.model];
+  settings.cacheCapacity = cfg.maxContext;
+  settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
+  settings.focusFloor = Math.min(settings.focusFloor, floorCount(cfg) - 1);
+  selection = null;
+  playing = false;
+  createFloorLabels();
+  ui = createUi();
+  rebuild();
+  overview();
+}
 
 function describeSelection(sel: HeadSelection): string {
   const perGroup = cfg.nHeads / cfg.nKvHeads;
   const first = sel.group * perGroup;
   const group = `KV group ${sel.group}`;
   return sel.head === null ? `${group} · Q heads ${first}–${first + perGroup - 1}` : `Q head ${sel.head} · ${group}`;
+}
+
+/** Mixture of experts: active parameters, and how the focused layer routes this pass's tokens. */
+function expertRows(): [string, string][] {
+  const { nExperts, topK } = cfg.moe!;
+  const rows: [string, string][] = [[`Active per token (${topK} of ${nExperts} experts)`, formatCount(stats.activeParams)]];
+  const counts = expertTokens?.[settings.focusFloor - 1];
+  if (!counts) return rows;
+  const layer = floorName(cfg, settings.focusFloor);
+  if (settings.mode === 'decode') {
+    const used = counts.flatMap((c, e) => (c > 0 ? [e] : []));
+    rows.push([`Experts used, ${layer}`, used.join(' and ')]);
+  } else {
+    rows.push([`Tokens per expert, ${layer}`, counts.map(formatInt).join(' · ')]);
+  }
+  return rows;
 }
 
 function renderStats() {
@@ -269,6 +323,7 @@ function renderStats() {
   const pass = decode ? 'per generated token' : 'for the prompt';
   const rows: [string, string][] = [
     ['Parameters', `${formatCount(stats.params)} · ${formatBytes(stats.paramBytes)}`],
+    ...(cfg.moe ? expertRows() : []),
     [isStatic ? `KV cache, static: ${formatInt(settings.cacheCapacity)} slots` : `KV cache @ ${formatInt(cached)} tokens`,
       `${formatCount(stats.kvElements)} · ${formatBytes(stats.kvBytes)}`],
     ['KV cache per token', formatBytes(kvPerToken)],

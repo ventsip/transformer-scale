@@ -84,6 +84,7 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
       let maxZ = 0;
       let x0 = 0;
       for (const [, items] of groupBy(sectionSpecs, (s) => s.station)) {
+        x0 += Math.max(0, ...items.map((s) => s.gapBefore ?? 0));
         let back = ROW_GAP / 2;
         let front = ROW_GAP / 2;
         let width = 0;

@@ -38,6 +38,8 @@ const RESERVED = 0.3;
 const FRESH = 0.6;
 /** Brightness of a tensor this pass replaces, e.g. a dynamic cache before torch.cat. */
 const SUPERSEDED = 0.45;
+/** Brightness of the weights of experts no token is routed to. */
+const IDLE = 0.3;
 /** Brightness of floors other than the focused one. */
 const OTHER_FLOOR = 0.15;
 
@@ -155,6 +157,7 @@ export class TensorScene {
     if (rows === 'reserved') out.multiplyScalar(RESERVED);
     if (rows === 'fresh') out.lerp(this.groupColor.setHex(0xffffff), FRESH);
     if (item.spec.superseded) out.multiplyScalar(SUPERSEDED);
+    if (item.spec.idle) out.multiplyScalar(IDLE);
     return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
   }
 

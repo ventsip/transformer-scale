@@ -1,9 +1,11 @@
 import type { ThicknessMode } from '../layout';
+import { MODELS, type ModelId } from '../model/config';
 import type { DType } from '../model/dtypes';
 import type { AttentionImpl, ElementwiseDetail, KvCacheImpl, Mode } from '../model/tensors';
 import { formatInt } from '../format';
 
 export interface Settings {
+  model: ModelId;
   mode: Mode;
   /** Prefill: prompt length. Decode: tokens already in the cache (L). */
   T: number;
@@ -81,6 +83,7 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
     return input;
   };
 
+  row('Model', select('model', (Object.keys(MODELS) as ModelId[]).map((id): [ModelId, string] => [id, MODELS[id].name])));
   row('Mode', select('mode', [['prefill', 'Prefill (process the prompt)'], ['decode', 'Decode (generate one token)']]));
 
   // Token count on a log scale: slider value is 100 × log2(T). In decode the cache must leave room for one more.

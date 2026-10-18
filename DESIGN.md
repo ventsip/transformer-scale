@@ -86,6 +86,21 @@
 - **Generate** steps through decode one token at a time (1 to 64 tokens/s): each step adds a row to every cache and
   the loop flashes.
 
+## Mixture of experts (Mixtral-8x7B)
+
+- Mixtral shares Llama-3-8B's attention, norms and dimensions; only the MLP differs, so switching models isolates MoE.
+  Each layer has 8 SwiGLU experts (HF `MixtralSparseMoeBlock`), and each token runs through 2 of them.
+- The MLP section holds the router (`gate.weight`, 4096 × 8; router logits, fp32 softmax, top-2 expert ids and
+  renormalized routing weights), then the 8 experts **in one row**, each a block of three stations (w1, w3, w2)
+  separated by a wider gap, then `m`, where `index_add` sums the weighted expert outputs back into token order.
+- Per expert, `gather` copies the h_norm rows of its tokens; its activations have one row per routed token, so in
+  prefill their depths show the load balance. An expert no token picks keeps its weights, dimmed, and gets no
+  activations, ops or reads. The layout does not depend on routing, so experts stay put while generating.
+- In decode only 2 of 8 experts per layer light up, and the pair changes from token to token: parameters 46.7B,
+  active per token 12.9B, and decode reads ~26 GB per token instead of all ~93 GB.
+- Routing is **illustrative and seeded** (`src/model/routing.ts`): mild per-layer imbalance, and consecutive tokens
+  repeat their first expert more often than chance, as the Mixtral paper observes. Real routing depends on the text.
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are
@@ -104,7 +119,7 @@
 
 ## Scope
 
-- Model: Llama-3-8B (`src/model/config.ts`); everything is derived from the config.
+- Models: Llama-3-8B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then
   sampled as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
 - Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
