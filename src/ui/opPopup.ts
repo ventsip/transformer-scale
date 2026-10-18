@@ -379,7 +379,7 @@ interface LineChartOptions {
 
 /** A single-function line chart in SVG, with an optional dashed reference, a marked point and a hover crosshair. */
 function lineChart(o: LineChartOptions): HTMLElement {
-  const W = 560;
+  const W = CHART_WIDTH;
   const H = 220;
   const pad = { l: 40, r: 12, t: 10, b: 22 };
   const t = (x: number) => (o.x.log ? Math.log(x) : x);
@@ -390,13 +390,9 @@ function lineChart(o: LineChartOptions): HTMLElement {
     const u = tLo + ((sx - pad.l) / (W - pad.l - pad.r)) * (tHi - tLo);
     return Math.max(o.x.lo, Math.min(o.x.hi, o.x.log ? Math.exp(u) : u));
   };
-  const root = el('figure', { className: 'op-chart' });
   const caption = el('figcaption');
   caption.innerHTML = o.caption;
-  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.label });
-  const tip = el('div', { className: 'op-chart-tip' });
-  tip.hidden = true;
-  root.append(caption, plot, tip);
+  const { root, plot, tip } = chartFrame({ height: H, label: o.label, caption });
 
   for (const y of o.y.ticks) {
     plot.append(svg('line', { x1: pad.l, x2: W - pad.r, y1: py(y), y2: py(y), class: y === 0 ? 'axis' : 'grid' }));
@@ -443,13 +439,11 @@ function lineChart(o: LineChartOptions): HTMLElement {
     cross.setAttribute('x2', String(px(x)));
     dot.setAttribute('cx', String(px(x)));
     dot.setAttribute('cy', String(py(o.f(x))));
-    tip.textContent = o.describe(x);
-    tip.hidden = false;
-    placeTip(tip, px(x) / W);
+    tip.show(o.describe(x), px(x));
   });
   hit.addEventListener('pointerleave', () => {
     for (const node of [cross, dot]) node.setAttribute('visibility', 'hidden');
-    tip.hidden = true;
+    tip.hide();
   });
   return root;
 }
@@ -497,16 +491,14 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
 
   // 2. Rotation by position.
   const sRot = stageSection(body, focus === 'rotate', 'RoPE: rotate each pair by pos · θ_i',
-    'q and k are split into pairs (HF rotate_half pairs dimension i with i + 64, not neighbors), and each pair is ' +
+    `q and k are split into pairs (HF rotate_half pairs dimension i with i + ${model.headDim / 2}, not neighbors), and each pair is ` +
     'rotated like a 2D vector. No parameters, nothing added: the vector keeps its length, only its angles change.');
   const maxLog = Math.round(Math.log2(ctx) * 100);
   const pos = el('input', { type: 'range', min: '0', max: String(maxLog), step: '1', value: '700' });
   const posShown = el('b');
   const posRow = el('label', { className: 'op-popup-control' });
   posRow.append(el('span', { textContent: 'Position' }), pos, posShown);
-  const dials = svg('svg', { viewBox: '0 0 560 250', role: 'img', 'aria-label': 'Rotation of selected dimension pairs' });
-  const dialFig = el('figure', { className: 'op-chart' });
-  dialFig.append(dials);
+  const { root: dialFig, plot: dials } = chartFrame({ height: 250, label: 'Rotation of selected dimension pairs' });
   const fRot = el('div', { className: 'op-popup-facts' });
   sRot.append(posRow, dialFig, fRot);
 
@@ -723,14 +715,12 @@ function lookupViz(body: HTMLElement): void {
   const sRows = stageSection(body, true, 'Token ids select rows of embed_tokens',
     `The table has one row of ${formatInt(model.dModel)} numbers per vocabulary entry (${formatInt(V)} rows). ` +
     "Each token id picks its row, which is copied into x: no multiplication, just indexing. Hover a token to follow it.");
-  const W = 560;
+  const W = CHART_WIDTH;
   const rowH = 22;
   const top = 26;
   const H = top + n * rowH + 10;
   const table = { x: 250, w: 44, y: top, h: n * rowH - 4 };
-  const diagram = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Token ids indexing rows of the embedding table' });
-  const fig = el('figure', { className: 'op-chart' });
-  fig.append(diagram);
+  const { root: fig, plot: diagram } = chartFrame({ height: H, label: 'Token ids indexing rows of the embedding table' });
   const fRows = el('div', { className: 'op-popup-facts' });
   sRows.append(fig, fRows);
 
@@ -888,11 +878,7 @@ function heatmap(onSelect: (row: number) => void) {
   const top = 58;
   const W = left + n * cell + 8;
   const H = top + n * cell + 34;
-  const root = el('figure', { className: 'op-chart heatmap' });
-  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Queries by keys' });
-  const tip = el('div', { className: 'op-chart-tip' });
-  tip.hidden = true;
-  root.append(plot, tip);
+  const { root, plot, tip } = chartFrame({ width: W, height: H, label: 'Queries by keys', className: 'op-chart heatmap' });
 
   function draw(d: HeatmapDraw) {
     plot.replaceChildren();
@@ -920,13 +906,7 @@ function heatmap(onSelect: (row: number) => void) {
         const masked = d.masked(i, j);
         plot.append(svg('rect', { x: x + 1, y: y + 1, width: cell - 2, height: cell - 2, rx: 3, fill: masked ? 'url(#hatch)' : d.color(d.value(i, j)), class: 'cell' }));
         const hit = svg('rect', { x, y, width: cell, height: cell, class: 'hit' });
-        hit.addEventListener('pointerenter', () => {
-          tip.textContent = d.describe(i, j);
-          tip.hidden = false;
-          placeTip(tip, (x + cell / 2) / W);
-          tip.style.top = `${((y - 4) / H) * 100}%`;
-        });
-        hit.addEventListener('pointerleave', () => (tip.hidden = true));
+        tip.attach(hit, () => d.describe(i, j), x + cell / 2, y - 4);
         hit.addEventListener('click', () => onSelect(i));
         plot.append(hit);
       }
@@ -1187,19 +1167,15 @@ interface Draw {
  * hover tooltips. `tone`: weight draws the columns in the weight color.
  */
 function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' = 'activation') {
-  const W = 560;
+  const W = CHART_WIDTH;
   const H = 150;
   const pad = { l: 40, r: 8, t: 10, b: 18 };
-  const root = el('figure', { className: 'op-chart' });
-  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
-  const tip = el('div', { className: 'op-chart-tip' });
-  tip.hidden = true;
+  let caption: HTMLElement | undefined;
   if (title) {
-    const caption = el('figcaption', { textContent: title });
+    caption = el('figcaption', { textContent: title });
     if (subtitle) caption.append(el('span', { textContent: subtitle }));
-    root.append(caption);
   }
-  root.append(plot, tip);
+  const { root, plot, tip } = chartFrame({ height: H, caption });
 
   function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], gap, yTick, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
@@ -1233,12 +1209,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
         dots.textContent = '…';
         plot.append(dots);
         const hit = svg('rect', { x: left, y: pad.t, width: right - left, height: H - pad.t - pad.b, class: 'hit' });
-        hit.addEventListener('pointerenter', () => {
-          tip.textContent = describe(i);
-          tip.hidden = false;
-          placeTip(tip, mid / W);
-        });
-        hit.addEventListener('pointerleave', () => (tip.hidden = true));
+        tip.attach(hit, () => describe(i), mid);
         plot.append(hit);
         return;
       }
@@ -1253,12 +1224,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
       }
       // Hit target: the whole band, taller than the bar.
       const hit = svg('rect', { x: cx - band / 2, y: pad.t, width: band, height: H - pad.t - pad.b, class: 'hit' });
-      hit.addEventListener('pointerenter', () => {
-        tip.textContent = describe(i);
-        tip.hidden = false;
-        placeTip(tip, cx / W);
-      });
-      hit.addEventListener('pointerleave', () => (tip.hidden = true));
+      tip.attach(hit, () => describe(i), cx);
       plot.append(hit);
     });
 
@@ -1330,6 +1296,41 @@ function bothEnds(length: number, head: number, tail: number, headTicks: number[
     values: (f: (index: number) => number) => Array.from({ length: cols }, (_, i) => (inGap(i) ? 0 : f(index(i)))),
     gapText: (what: string) => `${what} ${formatInt(head)}–${formatInt(length - tail - 1)}: ${formatInt(hidden)} not shown`,
   };
+}
+
+/** Width of the charts' coordinate system (they scale to the popup's width). */
+const CHART_WIDTH = 560;
+
+/**
+ * A chart's frame: a figure with an optional caption, its SVG plot of `width` × `height` units, and a tooltip that
+ * `tip.attach` shows while the pointer is over a part of the plot.
+ */
+function chartFrame(o: { height: number; width?: number; label?: string; caption?: HTMLElement; className?: string }) {
+  const width = o.width ?? CHART_WIDTH;
+  const root = el('figure', { className: o.className ?? 'op-chart' });
+  const plot = svg('svg', { viewBox: `0 0 ${width} ${o.height}`, role: 'img', ...(o.label ? { 'aria-label': o.label } : {}) });
+  const tipEl = el('div', { className: 'op-chart-tip' });
+  tipEl.hidden = true;
+  if (o.caption) root.append(o.caption);
+  root.append(plot, tipEl);
+  const tip = {
+    /** Shows `text` at `x` (in plot units) and, if given, at `y` (the tooltip's top, in plot units). */
+    show(text: string, x: number, y?: number) {
+      tipEl.textContent = text;
+      tipEl.hidden = false;
+      placeTip(tipEl, x / width);
+      if (y !== undefined) tipEl.style.top = `${(y / o.height) * 100}%`;
+    },
+    hide() {
+      tipEl.hidden = true;
+    },
+    /** Shows `text()` while the pointer is over `target`. */
+    attach(target: Element, text: () => string, x: number, y?: number) {
+      target.addEventListener('pointerenter', () => tip.show(text(), x, y));
+      target.addEventListener('pointerleave', tip.hide);
+    },
+  };
+  return { root, plot, tip };
 }
 
 /**
