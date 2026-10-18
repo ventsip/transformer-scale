@@ -553,8 +553,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const wqkv = weight('attn.c_attn.weight', dModel, qkvDim,
         `Q, K and V projections fused into one matrix (Conv1D: input dim first): output columns 0–${cfg.dModel - 1} are W_q, then W_k, then W_v. ${gqaNote}`);
       tensors[tensors.length - 1].fusedRoles = 'z';
+      split(wqkv, qHeads, 'z');
       const bqkv = vector('attn.c_attn.bias', qkvDim);
       tensors[tensors.length - 1].fusedRoles = 'x';
+      split(bqkv, qHeads, 'x');
       const third = (out: string, dim: Dim, what: 'Q' | 'K' | 'V') => {
         const role = what === 'Q' ? 'q' : what === 'K' ? 'k' : 'v';
         matmul(xNorm, wqkv, out, dModel, dim, n, bqkv);

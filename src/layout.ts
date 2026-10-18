@@ -148,7 +148,8 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
           for (let i = 0; i < s.tiles; i++) {
             const minX = x0 + xOffset + (i % t.cols) * (s.x + t.gap);
             const tileZ = zMin + Math.floor(i / t.cols) * (s.z + t.gap);
-            const split = s.heads && s.heads.axis !== 'tiles' ? s.heads : null;
+            // Fused Q/K/V tensors are sliced below, per third.
+            const split = s.heads && s.heads.axis !== 'tiles' && !s.fusedRoles ? s.heads : null;
             if (!split) {
               boxes.push({ cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
               heads.push(s.heads?.axis === 'tiles' ? i : null);
@@ -189,13 +190,17 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
           // Each box's attention role: the projection's own, or for a fused Q/K/V weight or bias, the third it covers.
           let roles = boxes.map(() => s.role ?? null);
           if (s.fusedRoles) {
-            const thirds = boxes.flatMap((b) => [0, 1, 2].map((k) => (s.fusedRoles === 'z'
-              ? { ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / 3), sz: b.sz / 3 }
-              : { ...b, cx: b.cx - b.sx / 2 + (k + 0.5) * (b.sx / 3), sx: b.sx / 3 })));
-            roles = boxes.flatMap(() => ['q', 'k', 'v'] as const);
-            heads.splice(0, heads.length, ...thirds.map(() => null));
-            rows = thirds.map((): RowState => 'written');
-            boxes.splice(0, boxes.length, ...thirds);
+            // Q, K and V thirds along the fused axis, each sliced into its heads (when the spec has them).
+            const perThird = s.heads?.count ?? 1;
+            const slices = 3 * perThird;
+            const parts = boxes.flatMap((b) => Array.from({ length: slices }, (_, k) => (s.fusedRoles === 'z'
+              ? { ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / slices), sz: b.sz / slices }
+              : { ...b, cx: b.cx - b.sx / 2 + (k + 0.5) * (b.sx / slices), sx: b.sx / slices })));
+            const thirdRoles = ['q', 'k', 'v'] as const;
+            roles = parts.map((_, k) => thirdRoles[Math.floor((k % slices) / perThird)]);
+            heads.splice(0, heads.length, ...parts.map((_, k) => (s.heads ? (k % slices) % perThird : null)));
+            rows = parts.map((): RowState => 'written');
+            boxes.splice(0, boxes.length, ...parts);
           }
           local.push({ spec: s, boxes, heads, rows, roles, busZ: 0 });
         }

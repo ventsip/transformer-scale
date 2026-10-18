@@ -421,7 +421,7 @@ function rowLine({ item, rows }: Pick): string {
   return line(`Written by earlier passes: <b>${formatInt(item.spec.filledZ - fresh)}</b> rows`);
 }
 
-function headLine({ item, box, head }: Pick): string {
+function headLine({ item, box, head, role }: Pick): string {
   const split = item.spec.heads;
   if (!split || head === null) return '';
   const band = box.sx * box.sz;
@@ -430,7 +430,9 @@ function headLine({ item, box, head }: Pick): string {
     : split.perGroup === 1
     ? `KV head ${head} of ${split.count}, shared by Q heads ${head * (cfg.nHeads / cfg.nKvHeads)}–${(head + 1) * (cfg.nHeads / cfg.nKvHeads) - 1}`
     : `Q head ${head} of ${split.count} · KV group ${kvGroup(split, head)}`;
-  return `<div class="tt-head">${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
+  // In a fused Q/K/V tensor, also which third the band is in.
+  const part = item.spec.fusedRoles && role ? `${role.toUpperCase()} · ` : '';
+  return `<div class="tt-head">${part}${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
 }
 
 function placeTooltip(e: PointerEvent) {

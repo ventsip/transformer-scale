@@ -98,7 +98,8 @@
   grouped-query attention visible (8 groups of 4 strips in Q next to 8 single strips in K).
 - **The Q, K and V projection matrices** are color-coded by role: `W_q` magenta, `W_k` orange, `W_v` teal. Their fill
   is blended halfway toward the role color (under the KV-group tint, so the head bands still show) and outlined in it.
-  GPT-2's fused `c_attn` weight and its bias are drawn as their three thirds along the output dim, one per role, and
+  GPT-2's fused `c_attn` weight and its bias are drawn as their three thirds along the output dim, one per role, each
+  sliced into its heads like the separate projections (so head selection reaches them), and
   each Q, K or V `@` draws its pipes from the thirds it reads. The tensors they produce
   and the pipes keep their usual colors.
 - **Clicking a band selects that head** (a K/V band selects its whole group): bands off its path dim, and flow
