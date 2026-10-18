@@ -1,20 +1,40 @@
-import { formatBytes, formatFlops, formatInt, formatPercent } from '../format';
+import { formatBytes, formatCount, formatFlops, formatInt, formatPercent } from '../format';
 import { LLAMA_3_8B, ropeDim, type ModelConfig } from '../model/config';
 import { ropeFrequencies } from '../model/rope';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
 import { PALETTE, cssColor } from '../palette';
 import { gaussian, rng } from '../random';
-import { floorLayer, type Mode, type OpSpec, type OpViz, type VizStage } from '../model/tensors';
+import {
+  cacheParts, floorLayer, type AttentionImpl, type KvCacheImpl, type MlaCache, type Mode, type OpSpec, type OpViz, type VizStage,
+} from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
 let model: ModelConfig = LLAMA_3_8B;
-/** The pass being drawn: popups quote its real sizes next to their illustrations. */
-let pass: { mode: Mode; T: number; weightDtype: DType; actDtype: DType } = { mode: 'prefill', T: 2048, weightDtype: 'bf16', actDtype: 'bf16' };
 
-export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number; weightDtype: DType; actDtype: DType }): void {
+/** The pass being drawn and its settings: popups quote its real sizes next to their illustrations. */
+interface PassContext {
+  mode: Mode;
+  T: number;
+  weightDtype: DType;
+  actDtype: DType;
+  kvDtype: DType;
+  attention: AttentionImpl;
+  kvCache: KvCacheImpl;
+  mlaCache: MlaCache;
+  cacheCapacity: number;
+}
+let pass: PassContext = {
+  mode: 'prefill', T: 2048, weightDtype: 'bf16', actDtype: 'bf16', kvDtype: 'bf16',
+  attention: 'fused', kvCache: 'dynamic', mlaCache: 'hf', cacheCapacity: LLAMA_3_8B.maxContext,
+};
+
+export function setPopupContext(cfg: ModelConfig, current: PassContext): void {
   model = cfg;
-  pass = { mode: current.mode, T: current.T, weightDtype: current.weightDtype, actDtype: current.actDtype };
+  pass = {
+    mode: current.mode, T: current.T, weightDtype: current.weightDtype, actDtype: current.actDtype, kvDtype: current.kvDtype,
+    attention: current.attention, kvCache: current.kvCache, mlaCache: current.mlaCache, cacheCapacity: current.cacheCapacity,
+  };
 }
 
 type Stage = VizStage<'sampling'>;
@@ -35,6 +55,8 @@ const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLEleme
   swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage, viz.width) },
   gelu: { title: 'GELU: a = h · Φ(h), tanh approximation', render: (body) => geluViz(body) },
   layernorm: { title: 'LayerNorm: (x − mean) / std · weight + bias', render: (body) => layerNormViz(body) },
+  mla: { title: 'Multi-head latent attention: K and V from a latent', render: (body, viz) => mlaViz(body, viz.stage) },
+  kvcache: { title: 'KV cache: how HF stores K and V', render: (body, viz) => kvCacheViz(body, viz.stage) },
 };
 
 /** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
@@ -1423,6 +1445,224 @@ function layerNormViz(body: HTMLElement): void {
   shift.input.addEventListener('input', update);
   scale.input.addEventListener('input', update);
   update();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shape diagrams: one token's tensors as rows of colored segments, all to one scale
+
+/** A run of one row, `units` wide, in a color class (`seg-…`), with an optional label and hover text. */
+interface Segment {
+  units: number;
+  cls: string;
+  label?: string;
+  tip?: string;
+}
+
+/** Room for the row names, row height and gap of shape diagrams. */
+const SHAPE = { nameWidth: 170, row: 22, gap: 8 };
+/** Average width of a label character, to tell whether a label fits its segment. */
+const LABEL_CHAR = 6;
+
+/** Rows of segments to one scale (the widest row spans the chart), each named on the left. */
+function shapeDiagram(rows: { name: string; segments: Segment[] }[], label: string): HTMLElement {
+  const height = rows.length * (SHAPE.row + SHAPE.gap);
+  const { root, plot, tip } = chartFrame({ height, label });
+  const widest = Math.max(...rows.map((r) => r.segments.reduce((a, s) => a + s.units, 0)));
+  const scale = (CHART_WIDTH - SHAPE.nameWidth - 4) / widest;
+  rows.forEach((row, r) => {
+    const y = r * (SHAPE.row + SHAPE.gap);
+    const name = svg('text', { x: SHAPE.nameWidth - 8, y: y + SHAPE.row / 2 + 4, class: 'tick', 'text-anchor': 'end' });
+    name.textContent = row.name;
+    plot.append(name);
+    let x = SHAPE.nameWidth;
+    for (const s of row.segments) {
+      const w = s.units * scale;
+      const rect = svg('rect', { x, y, width: Math.max(w - 1, 1), height: SHAPE.row, rx: 2, class: `seg ${s.cls}` });
+      plot.append(rect);
+      if (s.label && w > s.label.length * LABEL_CHAR + 8) {
+        const text = svg('text', { x: x + w / 2, y: y + SHAPE.row / 2 + 4, class: 'seg-label', 'text-anchor': 'middle' });
+        text.textContent = s.label;
+        plot.append(text);
+      }
+      if (s.tip) tip.attach(rect, () => s.tip!, x + w / 2, y + SHAPE.row + 2);
+      x += w;
+    }
+  });
+  return root;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multi-head latent attention (DeepSeek-V2): compress, expand, assemble K and V, pad V
+
+function mlaViz(body: HTMLElement, focus: VizStage<'mla'>): void {
+  const { kvLoraRank: R, qkNopeDim: N, qkRopeDim: P, vDim: V } = model.mla!;
+  const H = model.nHeads;
+  const D = model.dModel;
+  const QK = model.headDim;
+  const bytes = DTYPES[pass.kvDtype].bytes;
+  const facts = (html: string) => el('div', { className: 'op-popup-facts', innerHTML: html });
+
+  // 1. Compress.
+  const sCompress = stageSection(body, focus === 'compress', 'Compress: x → a latent and one RoPE key',
+    `One projection (kv_a_proj_with_mqa) maps each token's ${formatInt(D)} features to a ${R}-dim latent c_kv, which carries ` +
+    `K and V for all heads, plus one ${P}-dim key that alone will carry position, shared by all ${H} heads. One token, to scale.`);
+  sCompress.append(shapeDiagram([
+    { name: 'x_norm', segments: [{ units: D, cls: 'seg-x', label: `x_norm: ${formatInt(D)}` }] },
+    { name: 'kv_a output', segments: [
+      { units: R, cls: 'seg-latent', label: `c_kv ${R}`, tip: `c_kv: the latent, ${R} dims; normalized (kv_a_layernorm), then expanded` },
+      { units: P, cls: 'seg-rope', tip: `k_pe: ${P} dims, rotated by RoPE and shared by all ${H} heads` },
+    ] },
+  ], 'Compression of one token'));
+  const direct = D * H * (QK + V);
+  const mla = D * (R + P) + R * H * (N + V);
+  sCompress.append(facts(
+    `kv_a_proj_with_mqa has ${formatInt(D)} × ${R + P} = <b>${formatCount(D * (R + P))}</b> parameters. Projecting K and V ` +
+    `directly, as multi-head attention does, would take ${formatInt(D)} × ${formatInt(H * (QK + V))} = <b>${formatCount(direct)}</b>; ` +
+    `MLA's two projections together have <b>${formatCount(mla)}</b>. The latent is normalized before it is expanded; the RoPE key goes to RoPE.`));
+
+  // 2. Expand.
+  const sExpand = stageSection(body, focus === 'expand', 'Expand: the latent → each head\'s K and V',
+    `kv_b_proj maps the ${R}-dim latent to ${H} heads × (${N} for K, without position, + ${V} for V). Hover a block for its head.`);
+  sExpand.append(shapeDiagram([
+    { name: 'c_kv', segments: [{ units: R, cls: 'seg-latent', label: `c_kv ${R}` }] },
+    { name: `kv: ${H} heads`, segments: Array.from({ length: H }, (_, h) => [
+      { units: N, cls: 'seg-k', tip: `head ${h}: K without position, ${N} dims` },
+      { units: V, cls: 'seg-v', tip: `head ${h}: V, ${V} dims` },
+    ]).flat() },
+  ], 'Expansion of one token'));
+  sExpand.append(facts(
+    `kv_b_proj: ${R} × ${formatInt(H * (N + V))} = <b>${formatCount(R * H * (N + V))}</b> parameters. All ${formatInt(H * (N + V))} values ` +
+    `come from ${R}, so K and V together have rank at most ${R}: that is the compression. The expansion is cheap to redo, ` +
+    'which is what lets an engine cache only the latent.'));
+
+  // 3. Assemble.
+  const sAssemble = stageSection(body, focus === 'assemble', 'Assemble: K = [k_nope, k_pe], V a view',
+    `Each head's query and key have a part without position (${N}) and a RoPE part (${P}), so q · k = q_nope · k_nope + q_pe · k_pe: ` +
+    `position enters only through the ${P}-dim part. The RoPE key is the same for all heads, copied into each.`);
+  const keyRow = (h: number) => ({ name: `K, head ${h}`, segments: [
+    { units: N, cls: 'seg-k', label: `k_nope (head ${h})`, tip: `From the latent: head ${h}'s own, ${N} dims` },
+    { units: P, cls: 'seg-rope', label: 'k_pe', tip: `The shared RoPE key: the same ${P} values in every head` },
+  ] });
+  sAssemble.append(shapeDiagram([
+    { name: 'Q, each head', segments: [
+      { units: N, cls: 'seg-q', label: 'q_nope' }, { units: P, cls: 'seg-rope', label: 'q_pe', tip: `Rotated by RoPE, ${P} dims` },
+    ] },
+    keyRow(0), keyRow(1), keyRow(H - 1),
+    { name: 'V, each head', segments: [{ units: V, cls: 'seg-v', label: `v ${V}`, tip: `A view of kv: no copy` }] },
+  ], 'Query, keys and value of one token, per head'));
+  sAssemble.append(facts(
+    `HF writes Q and K into new tensors (new_empty, then slice copies): K is ${formatInt(H * QK)} wide per token, of which ` +
+    `${formatInt(H * P)} are ${H} copies of one ${P}-dim key. V is a view of kv (${H} × ${V}), copied only when cached.`));
+
+  // 4. Pad.
+  const padded = pass.attention === 'fused';
+  const sPad = stageSection(body, focus === 'pad', 'Pad V for FlashAttention, slice the output',
+    `FlashAttention needs one head width for Q, K and V, but V is ${V} wide and Q and K ${QK}. HF's FlashAttention path ` +
+    `pads V with ${QK - V} zeros per head, caches it padded, and cuts the output back to ${V}. Eager attention needs neither.`);
+  const zeros = { units: QK - V, cls: 'seg-zero', label: 'zeros', tip: `${QK - V} zeros per head` };
+  sPad.append(shapeDiagram([
+    { name: 'V, each head', segments: [{ units: V, cls: 'seg-v', label: `v ${V}` }] },
+    { name: 'padded V (cached)', segments: [{ units: V, cls: 'seg-v', label: `v ${V}` }, zeros] },
+    { name: 'output, each head', segments: [{ units: V, cls: 'seg-x', label: `${V}` }, zeros] },
+    { name: 'after slice', segments: [{ units: V, cls: 'seg-x', label: `${V}` }] },
+  ], 'Padding of V, per head'));
+  const keys = pass.T + (pass.mode === 'decode' ? 1 : 0);
+  const padBytes = H * (QK - V) * bytes * model.nLayers;
+  sPad.append(facts(padded
+    ? `In this view (fused attention): every token adds <b>${formatBytes(padBytes)}</b> of zeros to the cache across ${model.nLayers} ` +
+      `layers, <b>${formatBytes(padBytes * keys)}</b> at ${formatInt(keys)} tokens, and a third of the · V multiplications are by zeros.`
+    : `In this view (${pass.attention} attention) nothing is padded; with fused attention every token would add ${formatBytes(padBytes)} of zeros.`));
+
+  // What the cache holds, in each setting.
+  const sCache = stageSection(body, false, 'What the cache holds, per token and layer',
+    'The same model, three caches. Switch with the MLA cache and Attention settings.');
+  const variants: [string, AttentionImpl, MlaCache][] = [['HF, eager', 'eager', 'hf'], ['HF, FlashAttention', 'fused', 'hf'], ['latent (vLLM, SGLang)', pass.attention, 'latent']];
+  const current = variants.findIndex(([, a, m]) => m === pass.mlaCache && (m === 'latent' || a === pass.attention));
+  sCache.append(shapeDiagram(variants.map(([name, attention, mlaCache], i) => ({
+    name: i === current ? `▸ ${name}` : name,
+    segments: cacheParts(model, { attention, mlaCache }).flatMap((p) => {
+      const cls = p.name === 'K' ? 'seg-k' : p.name === 'V' ? 'seg-v' : p.name === 'c_kv' ? 'seg-latent' : 'seg-rope';
+      const real = p.width - (p.padding ?? 0);
+      return [{ units: real, cls, label: p.name, tip: `${p.name}: ${formatInt(real)} values` },
+        ...(p.padding ? [{ ...zeros, units: p.padding, tip: `${formatInt(p.padding)} zeros` }] : [])];
+    }),
+  })), 'Cache per token and layer'));
+  const perToken = (attention: AttentionImpl, mlaCache: MlaCache) =>
+    cacheParts(model, { attention, mlaCache }).reduce((a, p) => a + p.width, 0) * bytes * model.nLayers;
+  sCache.append(facts(variants.map(([name, a, m]) =>
+    `${name}: <b>${formatBytes(perToken(a, m))}</b> per token, ${formatBytes(perToken(a, m) * keys)} at ${formatInt(keys)} tokens`).join('<br>') +
+    '<br>▸ marks this view.'));
+
+  ({ compress: sCompress, expand: sExpand, assemble: sAssemble, pad: sPad })[focus].scrollIntoView({ block: 'center' });
+}
+
+// ---------------------------------------------------------------------------------------------
+// KV cache: what each token adds, and how HF's dynamic and static caches store it
+
+function kvCacheViz(body: HTMLElement, focus: VizStage<'kvcache'>): void {
+  const bytes = DTYPES[pass.kvDtype].bytes;
+  const parts = cacheParts(model, pass);
+  const layerToken = parts.reduce((a, p) => a + p.width, 0) * bytes;
+  const perToken = layerToken * model.nLayers;
+  const decode = pass.mode === 'decode';
+  const keys = pass.T + (decode ? 1 : 0);
+  const ctx = model.maxContext;
+  const facts = (html: string) => el('div', { className: 'op-popup-facts', innerHTML: html });
+
+  // 1. What each token adds.
+  const sToken = stageSection(body, false, 'What each token adds',
+    `Every token leaves its ${parts.map((p) => p.name).join(' and ')} in every layer's cache, to be read by all later tokens. One layer, to scale.`);
+  sToken.append(shapeDiagram(parts.map((p) => ({
+    name: p.name,
+    segments: [{ units: p.width - (p.padding ?? 0), cls: p.name === 'K' ? 'seg-k' : p.name === 'V' ? 'seg-v' : p.name === 'c_kv' ? 'seg-latent' : 'seg-rope',
+      label: `${formatInt(p.width - (p.padding ?? 0))}` },
+      ...(p.padding ? [{ units: p.padding, cls: 'seg-zero', label: 'zeros' }] : [])],
+  })), 'Cache entries of one token in one layer'));
+  sToken.append(facts(
+    `<b>${formatBytes(layerToken)}</b> per token per layer (${DTYPES[pass.kvDtype].label}), <b>${formatBytes(perToken)}</b> across ${model.nLayers} layers: ` +
+    `<b>${formatBytes(perToken * keys)}</b> at ${formatInt(keys)} tokens, ${formatBytes(perToken * ctx)} at the full ${formatInt(ctx)}-token context.`));
+
+  // 2. Dynamic cache.
+  const sDynamic = stageSection(body, focus === 'dynamic', 'Dynamic cache: torch.cat every step',
+    'HF\'s default. Prefill keeps the K and V tensors as they are. Each decode step, DynamicCache.update calls torch.cat: it ' +
+    'allocates a tensor one row longer and copies the whole cache into it, in every layer.');
+  const unit = perToken * ctx * 2 >= 2 ** 31 ? { bytes: 2 ** 30, name: 'GiB' } : { bytes: 2 ** 20, name: 'MiB' };
+  const copied = (L: number) => (L * perToken * 2) / unit.bytes;
+  const hi = copied(ctx);
+  const step = niceStep(hi / 4);
+  sDynamic.append(lineChart({
+    caption: `<span class="op-legend"><i class="swatch-line"></i>${unit.name} read and written per decode step, all layers, dynamic</span>` +
+      '<span class="op-legend"><i class="swatch-ref"></i>static: one row</span>',
+    label: 'Bytes copied per decode step against cache length',
+    x: { lo: 0, hi: ctx, ticks: [0, ctx / 4, ctx / 2, (3 * ctx) / 4, ctx].map(Math.round), tickLabel: (x) => tokens(x) },
+    y: { lo: 0, hi: hi * 1.05, ticks: Array.from({ length: Math.floor(hi / step) + 1 }, (_, i) => i * step) },
+    f: copied,
+    ref: () => (perToken * 2) / unit.bytes,
+    marker: { x: keys, label: `${formatInt(keys)} tokens` },
+    snap: Math.round,
+    describe: (L) => `${formatInt(L)} cached tokens · torch.cat copies ${formatBytes(L * perToken * 2)} per step`,
+  }));
+  const more = 1000;
+  const copiedOver = perToken * 2 * (more * keys + (more * (more - 1)) / 2);
+  sDynamic.append(facts(
+    `At ${formatInt(keys)} cached tokens each step copies <b>${formatBytes(keys * perToken * 2)}</b> (read plus write), against ` +
+    `${formatBytes(perToken * 2)} for the one new row. Generating ${formatInt(more)} more tokens copies <b>${formatBytes(copiedOver)}</b> in all: ` +
+    'the cost grows with the square of the length.'));
+
+  // 3. Static cache.
+  const cap = pass.cacheCapacity;
+  const sStatic = stageSection(body, focus === 'static', 'Static cache: allocated up front',
+    `StaticCache allocates every layer's K and V for ${formatInt(cap)} tokens before the first step, and index_copy_ writes each new row ` +
+    'into its slot: no copying, and fixed shapes (what torch.compile and CUDA graphs need), at the price of memory reserved from the start.');
+  sStatic.append(shapeDiagram([{ name: 'cache slots', segments: [
+    { units: Math.min(keys, cap), cls: 'seg-latent', label: 'written', tip: `${formatInt(Math.min(keys, cap))} slots written` },
+    { units: Math.max(0, cap - keys), cls: 'seg-zero', label: 'reserved', tip: `${formatInt(Math.max(0, cap - keys))} slots allocated, not yet written` },
+  ] }], 'Slots of a static cache'));
+  sStatic.append(facts(
+    `Allocated: <b>${formatBytes(perToken * cap)}</b> across ${model.nLayers} layers; written so far: ${formatBytes(perToken * Math.min(keys, cap))} ` +
+    `(${formatPercent(Math.min(keys, cap) / cap)}). Each step writes ${formatBytes(perToken)}. HF attends over all slots, masking the empty ones.`));
+
+  (focus === 'dynamic' ? sDynamic : sStatic).scrollIntoView({ block: 'center' });
 }
 
 interface Draw {

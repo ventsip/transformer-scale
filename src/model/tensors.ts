@@ -97,6 +97,19 @@ export interface HeadSelection {
 
 export const kvGroup = (split: HeadSplit, head: number) => Math.floor(head / split.perGroup);
 
+/**
+ * What one layer's KV cache holds for each token: K and V (MLA: as HF caches them, V padded to the Q and K head width
+ * under FlashAttention), or MLA's latent and RoPE key. Values, not bytes.
+ */
+export function cacheParts(cfg: ModelConfig, o: Pick<BuildOptions, 'attention' | 'mlaCache'>): { name: string; width: number; padding?: number }[] {
+  const mla = cfg.mla;
+  if (mla && o.mlaCache === 'latent') return [{ name: 'c_kv', width: mla.kvLoraRank }, { name: 'k_pe', width: mla.qkRopeDim }];
+  const k = { name: 'K', width: cfg.nKvHeads * cfg.headDim };
+  if (!mla) return [k, { name: 'V', width: cfg.nKvHeads * cfg.headDim }];
+  const padding = o.attention === 'fused' ? cfg.nHeads * (cfg.headDim - mla.vDim) : 0;
+  return [k, { name: 'V', width: cfg.nHeads * mla.vDim + padding, padding }];
+}
+
 export function selectionFor(split: HeadSplit, head: number): HeadSelection {
   return split.perGroup === 1 ? { group: head, head: null } : { group: kvGroup(split, head), head };
 }
@@ -135,7 +148,9 @@ export type OpViz =
   | { panel: 'rmsnorm'; stage: 'input' | 'mean' | 'normalize' | 'weight' }
   | { panel: 'layernorm' }
   | { panel: 'gelu' }
-  | { panel: 'swiglu'; stage: 'silu' | 'gate'; width: number };
+  | { panel: 'swiglu'; stage: 'silu' | 'gate'; width: number }
+  | { panel: 'mla'; stage: 'compress' | 'expand' | 'assemble' | 'pad' }
+  | { panel: 'kvcache'; stage: 'dynamic' | 'static' };
 export type VizStage<P extends OpViz['panel']> = Extract<OpViz, { panel: P; stage: unknown }>['stage'];
 
 /** Extra fields of an op, given when it is created. */
@@ -187,6 +202,9 @@ const TRANSIENT = 'Transient: during inference it only exists while this layer r
 const KV = 'Written to the KV cache: persists for the whole generation.';
 /** Gap between activations stacked in one station, leaving room for the op between them. */
 const STACK_GAP = 2048;
+/** The MLA popup's stages of the ops that build K and V and pad V. */
+const ASSEMBLE: OpExtra = { viz: { panel: 'mla', stage: 'assemble' } };
+const PAD: OpExtra = { viz: { panel: 'mla', stage: 'pad' } };
 /** The attention popup's stages that eager steps and the fused kernel belong to. */
 const SCORES: OpExtra = { viz: { panel: 'attention', stage: 'scores' } };
 const SOFTMAX: OpExtra = { viz: { panel: 'attention', stage: 'softmax' } };
@@ -639,7 +657,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         });
         op('cache write', [src], buffer, decode
           ? `index_copy_ of the new ${name} row into slot ${formatInt(past)}: only ${n} row is written.`
-          : `index_copy_ of ${name} into the preallocated buffer, at positions 0 … T−1.`);
+          : `index_copy_ of ${name} into the preallocated buffer, at positions 0 … T−1.`, { viz: { panel: 'kvcache', stage: 'static' } });
         return buffer;
       }
       // Dynamic cache in decode: the previous cache tensor, then the new one torch.cat builds from it.
@@ -655,7 +673,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       });
       op('cat', [previous, src], grown,
         `DynamicCache.update: torch.cat allocates a new ${formatInt(keys)}-row tensor and copies the whole ` +
-        `cache plus the new ${name} row into it, every step. A static cache writes just the one row.`);
+        `cache plus the new ${name} row into it, every step. A static cache writes just the one row.`, { viz: { panel: 'kvcache', stage: 'dynamic' } });
       return grown;
     };
     const keyRows: Dim = { name: decode ? 'cached tokens' : 'T', size: keys };
@@ -716,7 +734,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         `The compression: ${formatInt(cfg.dModel)} features down to a ${kvLoraRank}-dim latent, plus one ${qkRopeDim}-dim key ` +
         `for RoPE shared by all ${cfg.nHeads} heads (as in multi-query attention: "mqa").`);
       const kvARaw = act('kv_a', 'x_norm · W_kv_a: latent and RoPE key', kvA);
-      matmul(xNorm, wkvA, kvARaw, dModel, kvA);
+      matmul(xNorm, wkvA, kvARaw, dModel, kvA, { viz: { panel: 'mla', stage: 'compress' } });
       next();
       // The normalized latent and the rotated shared key, stacked in one station. With a latent cache they are what
       // the cache holds.
@@ -735,13 +753,13 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const expandKv = (latentIn: string, keyIn: string, rows: Dim, kExtra: ActOptions, vExtra: ActOptions) => {
         const kv = act('kv', `c_kv · W_kv_b: each head's K (no RoPE) and V${rows === tok ? '' : ', all cached tokens'}`, kvB,
           { heads: kvHeads, rows, note: rows === tok ? TRANSIENT : `${TRANSIENT} Recomputed from the whole latent cache every pass.` });
-        matmul(latentIn, wkvB, kv, latent, kvB, { rows: rows.size });
+        matmul(latentIn, wkvB, kv, latent, kvB, { rows: rows.size, viz: { panel: 'mla', stage: 'expand' } });
         next();
         const k = act('k', `K = [k_nope, k_pe]: ${cfg.headDim} dims per head`, kvDim, { heads: kvHeads, rows, ...kExtra });
         op('cat', [kv, keyIn], k,
-          `Joins each head's ${qkNopeDim}-dim K with the shared ${qkRopeDim}-dim RoPE key, broadcast to all ${cfg.nHeads} heads: a new tensor.`);
+          `Joins each head's ${qkNopeDim}-dim K with the shared ${qkRopeDim}-dim RoPE key, broadcast to all ${cfg.nHeads} heads: a new tensor.`, ASSEMBLE);
         const v = act('v', `V: the last ${vHead} of each head's kv columns`, oDim, { heads: kvHeads, rows, rowGap: STACK_GAP, ...vExtra });
-        op('split', [kv], v, `The V part of each head's ${qkNopeDim + vHead} kv columns: a view of kv, no copy.`);
+        op('split', [kv], v, `The V part of each head's ${qkNopeDim + vHead} kv columns: a view of kv, no copy.`, ASSEMBLE);
         return { k, v };
       };
       if (latentCache) {
@@ -767,7 +785,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
             note: kvNote(` ${cfg.headDim - vHead} of each head's ${cfg.headDim} columns are zeros, cached too: a third of the V cache holds nothing.`),
           });
           op('pad', [kv.v], v, `F.pad appends ${cfg.headDim - vHead} zeros to each head's ${vHead}-dim V: FlashAttention needs one head width for Q, K and V. ` +
-            'The cache stores the padding too. Eager attention skips this.');
+            'The cache stores the padding too. Eager attention skips this.', PAD);
         }
         vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', vCachedWidth);
       }
@@ -864,7 +882,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         scaleNote + staticNote + (vPadded ? ` V is padded, so a third of the · V work multiplies zeros.` : ''), { flops: usefulFlops, ...SCORES });
       if (vPadded) {
         attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads, rowGap: STACK_GAP });
-        op('slice', [out], attn, `Keeps the first ${vHeadDim(cfg)} of each head's ${cfg.headDim} output columns; reshape copies them into one ${oDim.size}-wide tensor.`);
+        op('slice', [out], attn, `Keeps the first ${vHeadDim(cfg)} of each head's ${cfg.headDim} output columns; reshape copies them into one ${oDim.size}-wide tensor.`, PAD);
       }
     }
     next();

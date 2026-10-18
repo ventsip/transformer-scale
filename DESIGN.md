@@ -81,6 +81,15 @@
   over all of it), with shift and scale sliders;
   x with its mean, x − mean (the step RMSNorm leaves out, with how much RMSNorm's output would move under the shift),
   division by √(var + ε) against ±1 lines, then weight, bias and output; and the fused kernel's real traffic.
+- **Multi-head latent attention** (DeepSeek, opened from `kv_a_proj` and `kv_b_proj`'s `@`, MLA's `cat`, `split`, `pad`
+  and `slice`): shape diagrams, one token's tensors as colored segments to scale. Compress (x_norm → c_kv + k_pe, with
+  the parameters saved against direct K and V projections), expand (c_kv → 16 heads of K and V), assemble
+  (Q and K as no-position + RoPE parts, the shared k_pe copied into every head, V a view), pad (V and the output padded
+  for FlashAttention, then sliced, with the zeros' real cost), and what the cache holds in each setting, this one marked.
+- **KV cache** (opened from the cache ops: `cat` of a dynamic cache in decode, `cache write` of a static one; every
+  model): what each token adds per layer (from `cacheParts`, shared with the builder), with the real totals; the
+  dynamic cache's torch.cat copying the whole cache every step, as a line against the cache length with this pass
+  marked, and the total for 1,000 more tokens; the static cache's written and reserved slots.
 - **RoPE** (opened from `cos(pos·θ)` / `sin(pos·θ)` on the embedding floor, or `RoPE` in any layer; computed from the
   model's RoPE base, head_dim and context): the wavelength of each of the 64 pairs on a log axis against the context
   length; dials for 8 pairs rotating with a position slider; and the score of identical q and k against their distance

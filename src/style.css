@@ -571,3 +571,44 @@ button.play {
 .section-label.idle {
   opacity: 0.45;
 }
+
+/* Shape diagrams: one token's tensors as segments, colored like their blocks. */
+.op-chart .seg-x {
+  fill: var(--c-activation);
+}
+
+.op-chart .seg-q {
+  fill: var(--c-q);
+}
+
+.op-chart .seg-k {
+  fill: var(--c-k);
+}
+
+.op-chart .seg-v {
+  fill: var(--c-v);
+}
+
+.op-chart .seg-latent {
+  fill: var(--c-kv);
+}
+
+.op-chart .seg-rope {
+  fill: var(--c-buffer);
+}
+
+.op-chart .seg-zero {
+  fill: none;
+  stroke: var(--c-neutral-500);
+  stroke-dasharray: 3 3;
+}
+
+.op-chart .seg-label {
+  fill: var(--c-background);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.op-chart .seg-zero + .seg-label {
+  fill: var(--c-neutral-400);
+}
