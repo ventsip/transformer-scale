@@ -498,7 +498,7 @@ function lineChart(o: LineChartOptions): HTMLElement {
     dot.setAttribute('cy', String(py(o.f(x))));
     tip.textContent = o.describe(x);
     tip.hidden = false;
-    tip.style.left = `${(px(x) / W) * 100}%`;
+    placeTip(tip, px(x) / W);
   });
   hit.addEventListener('pointerleave', () => {
     for (const node of [cross, dot]) node.setAttribute('visibility', 'hidden');
@@ -741,8 +741,9 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
 // Embedding lookup: each token id selects one row of the table
 
 const LOOKUP_WORDS = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'the', 'mat', 'was', 'warm'];
-/** Features of the selected row shown as bars. */
-const ROW_FEATURES = 48;
+/** Features of the selected row shown as bars: the first ROW_HEAD and the last ROW_TAIL, with a gap between. */
+const ROW_HEAD = 36;
+const ROW_TAIL = 12;
 
 /**
  * The prompt as (token, id) pairs. The beginning-of-text ids are the real ones (Llama 3: 128000, Mixtral: 1);
@@ -777,7 +778,7 @@ function lookupViz(body: HTMLElement): void {
 
   // 2. The selected row.
   const sRow = stageSection(body, false, 'One row: a token\'s embedding',
-    `Illustrative values for the first ${ROW_FEATURES} of ${model.dModel.toLocaleString('en-US')} features. Learned in training; ` +
+    `Illustrative values from both ends of the ${model.dModel.toLocaleString('en-US')} features. Learned in training; ` +
     'the same token always gets the same row, whatever its position (RoPE adds position later, inside attention).');
   const cRow = barChart('', '', 'weight');
   sRow.append(cRow.root);
@@ -855,14 +856,25 @@ function lookupViz(body: HTMLElement): void {
       ' Ids other than the first are illustrative.';
     const rand = rng(id);
     const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
-    // Embedding entries are small numbers, a few hundredths.
-    const values = Array.from({ length: ROW_FEATURES }, () => 0.02 * normal());
+    // The whole row (embedding entries are small numbers, a few hundredths); the chart shows both ends of it.
+    const row = Array.from({ length: model.dModel }, () => 0.02 * normal());
+    const d = model.dModel;
+    const hidden = d - ROW_HEAD - ROW_TAIL;
+    // Columns: the first ROW_HEAD features, one gap column, the last ROW_TAIL.
+    const feature = (i: number) => (i < ROW_HEAD ? i : d - (ROW_HEAD + 1 + ROW_TAIL - i));
+    const values = Array.from({ length: ROW_HEAD + 1 + ROW_TAIL }, (_, i) => (i === ROW_HEAD ? 0 : row[feature(i)]));
     const span = Math.max(...values.map(Math.abs));
     cRow.root.querySelector('figcaption')?.remove();
-    cRow.root.prepend(el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` }));
+    const caption = el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` });
+    caption.append(el('span', { textContent: `all ${d.toLocaleString('en-US')} features: the first ${ROW_HEAD}, … ${hidden.toLocaleString('en-US')} more …, the last ${ROW_TAIL}` }));
+    cRow.root.prepend(caption);
     cRow.draw({
-      values, lo: -span, hi: span, ticks: [0, 16, 32, ROW_FEATURES - 1], tickLabel: String,
-      describe: (i) => `feature ${i} · ${values[i].toFixed(4)}`,
+      values, lo: -span, hi: span, gap: ROW_HEAD,
+      ticks: [0, 16, 32, ROW_HEAD, ROW_HEAD + ROW_TAIL],
+      tickLabel: (i) => (i === ROW_HEAD ? `+${hidden.toLocaleString('en-US')}` : feature(i).toLocaleString('en-US')),
+      describe: (i) => (i === ROW_HEAD
+        ? `features ${ROW_HEAD.toLocaleString('en-US')}–${(d - ROW_TAIL - 1).toLocaleString('en-US')}: ${hidden.toLocaleString('en-US')} not shown`
+        : `feature ${feature(i).toLocaleString('en-US')} · ${values[i].toFixed(4)}`),
     });
   }
   update();
@@ -953,7 +965,7 @@ function heatmap(onSelect: (row: number) => void) {
         hit.addEventListener('pointerenter', () => {
           tip.textContent = d.describe(i, j);
           tip.hidden = false;
-          tip.style.left = `${((x + cell / 2) / W) * 100}%`;
+          placeTip(tip, (x + cell / 2) / W);
           tip.style.top = `${((y - 4) / H) * 100}%`;
         });
         hit.addEventListener('pointerleave', () => (tip.hidden = true));
@@ -1185,6 +1197,8 @@ interface Draw {
   values: number[];
   /** Horizontal reference lines, labeled at the right (or the left, with `start`). */
   refs?: { value: number; label: string; start?: boolean }[];
+  /** A column standing for values left out: drawn as an ellipsis, with no bar. */
+  gap?: number;
   /** Label of the column ticks (default: rank, #1). */
   tickLabel?: (i: number) => string;
   /** Label of the value ticks (default: the value, compact). */
@@ -1223,7 +1237,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
   }
   root.append(plot, tip);
 
-  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], yTick, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
+  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], gap, yTick, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
     const x0 = pad.l;
     const band = (W - pad.l - pad.r) / values.length;
@@ -1242,7 +1256,27 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
 
     values.forEach((v, i) => {
       const cx = x0 + band * (i + 0.5);
+      if (i === gap) {
+        // Columns left out: an ellipsis on the baseline between two dashed lines, instead of a bar.
+        for (const x of [cx - band / 2, cx + band / 2]) {
+          plot.append(svg('line', { x1: x, x2: x, y1: pad.t, y2: H - pad.b, class: 'gap-line' }));
+        }
+        const dots = svg('text', { x: cx, y: y(0) + 4, class: 'gap-mark', 'text-anchor': 'middle' });
+        dots.textContent = '…';
+        plot.append(dots);
+      }
       const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : tone === 'weight' ? 'bar weight' : 'bar';
+      if (i === gap) {
+        const hit = svg('rect', { x: cx - band / 2, y: pad.t, width: band, height: H - pad.t - pad.b, class: 'hit' });
+        hit.addEventListener('pointerenter', () => {
+          tip.textContent = describe(i);
+          tip.hidden = false;
+          placeTip(tip, cx / W);
+        });
+        hit.addEventListener('pointerleave', () => (tip.hidden = true));
+        plot.append(hit);
+        return;
+      }
       plot.append(column(cx, barW, y(0), y(v), cls));
       // Outline on top, so it shows whether the bar is taller or shorter.
       if (ghost) plot.append(column(cx, barW, y(0), y(ghost[i]), 'ghost'));
@@ -1256,7 +1290,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
       hit.addEventListener('pointerenter', () => {
         tip.textContent = describe(i);
         tip.hidden = false;
-        tip.style.left = `${(cx / W) * 100}%`;
+        placeTip(tip, cx / W);
       });
       hit.addEventListener('pointerleave', () => (tip.hidden = true));
       plot.append(hit);
@@ -1303,4 +1337,14 @@ function tickText(v: number, step: number): string {
   if (a >= 1e6) return `${+(v / 1e6).toPrecision(3)}M`;
   if (a >= 1e4) return `${+(v / 1e3).toPrecision(3)}K`;
   return v.toFixed(Math.max(0, -Math.floor(Math.log10(step))));
+}
+
+/**
+ * Puts a chart tooltip at `fraction` of the chart's width, sliding its anchor from its left edge (at 0) to its right
+ * edge (at 1), so it never sticks out of the chart.
+ */
+function placeTip(tip: HTMLElement, fraction: number): void {
+  const f = Math.max(0, Math.min(1, fraction));
+  tip.style.left = `${f * 100}%`;
+  tip.style.transform = `translateX(${-f * 100}%)`;
 }

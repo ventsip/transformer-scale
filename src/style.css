@@ -540,3 +540,14 @@ button.play {
 .op-chart .xrow.on {
   fill: #f5a524;
 }
+
+.op-chart .gap-mark {
+  fill: var(--muted);
+  font-size: 14px;
+}
+
+.op-chart .gap-line {
+  stroke: #64748b;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
