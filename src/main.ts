@@ -99,6 +99,8 @@ createFloorLabels();
 // State derived from settings.
 let specs: TensorSpec[] = [];
 let placed: PlacedTensor[] = [];
+/** Height of the focused floor's base: the fallback depth for zoom and pan (see pivotUnderCursor). */
+let focusY = 0;
 let stats: Stats;
 /** Mixture of experts: tokens routed to each expert, per decoder layer. */
 let expertTokens: number[][] | undefined;
@@ -119,6 +121,7 @@ function rebuild() {
   setPopupContext(cfg, settings);
   const layout = layoutTensors(specs, settings);
   placed = layout.placed;
+  focusY = layout.floorY(settings.focusFloor);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
@@ -372,7 +375,7 @@ const tooltip = document.getElementById('tooltip')!;
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 
-function pickAt(e: PointerEvent) {
+function pickAt(e: MouseEvent) {
   pointer.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
   return tensors.pick(raycaster);
@@ -453,6 +456,31 @@ function showTooltip(p: Pick, e: PointerEvent) {
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
   placeTooltip(e);
 }
+
+/**
+ * Before a zoom or pan, moves the orbit pivot along the view direction to the depth of what is under the cursor:
+ * a block, or else the focused floor's plane. OrbitControls scales both by the camera–pivot distance, so a pivot
+ * left close to the camera (after zooming into empty space, or flying to a small block) made them crawl. The camera
+ * keeps its position and orientation, so the view does not move.
+ */
+function pivotUnderCursor(e: MouseEvent) {
+  if (flight) return;
+  const block = pickAt(e);
+  const point = block
+    ? raycaster.ray.at(block.distance, new THREE.Vector3())
+    : raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -focusY), new THREE.Vector3());
+  if (!point) return;
+  const dir = camera.getWorldDirection(new THREE.Vector3());
+  const depth = point.sub(camera.position).dot(dir);
+  if (depth > 0) controls.target.copy(camera.position).addScaledVector(dir, depth);
+}
+
+// Capture phase: runs before OrbitControls handles the same events. Right or middle button pans, and so does the left
+// button with Ctrl, Meta or Shift held.
+renderer.domElement.addEventListener('wheel', pivotUnderCursor, { capture: true, passive: true });
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) pivotUnderCursor(e);
+}, { capture: true });
 
 // Hover: a block, or a flow pipe with its endpoints (the tensor and the op), whichever is nearer.
 renderer.domElement.addEventListener('pointermove', (e) => {
