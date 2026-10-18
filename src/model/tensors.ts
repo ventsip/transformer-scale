@@ -736,59 +736,54 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const kvARaw = act('kv_a', 'x_norm · W_kv_a: latent and RoPE key', kvA);
       matmul(xNorm, wkvA, kvARaw, dModel, kvA, { viz: { panel: 'mla', stage: 'compress' } });
       next();
-      // The normalized latent and the rotated shared key, stacked in one station. With a latent cache they are what
-      // the cache holds.
+      // The normalized latent and the rotated shared key, each in its own station. With a latent cache each is cached in
+      // front of itself, so the caches lie side by side and a static cache's long buffers do not run into each other.
       const latentKind = latentCache ? kvKind : 'activation';
       const latentNote = (what: string) => (latentCache ? kvNote(` The latent cache keeps ${what}: ${kvLoraRank + qkRopeDim} values per token, against ${formatInt(kvDim.size + oDim.size)} for K and V.`) : TRANSIENT);
       const cKv = rmsNorm(kvARaw, 'self_attn.kv_a_layernorm.weight', 'c_kv', `c_kv = RMSNorm(latent): ${kvLoraRank} dims`, latent,
         { kind: latentKind, note: latentNote('this latent') });
-      const kPe = act('k_pe', `k_pe = RoPE(shared key): ${qkRopeDim} dims`, ropeKey,
-        { kind: latentKind, note: latentNote('the latent and this key'), rowGap: STACK_GAP });
-      ropeOp(kvARaw, kPe, 1, `rotates the one ${qkRopeDim}-dim key shared by all heads, as ${pairing},`);
+      const cKvCached = latentCache ? cacheWrite(cKv, 'c_kv_cache', `latent cache, layer ${l}: c_kv`, 'latent', latent, undefined) : cKv;
       next();
+      const kPe = act('k_pe', `k_pe = RoPE(shared key): ${qkRopeDim} dims`, ropeKey,
+        { kind: latentKind, note: latentNote('the latent and this key') });
+      ropeOp(kvARaw, kPe, 1, `rotates the one ${qkRopeDim}-dim key shared by all heads, as ${pairing},`);
+      const kPeCached = latentCache ? cacheWrite(kPe, 'k_pe_cache', `latent cache, layer ${l}: k_pe`, 'RoPE key', ropeKey, undefined) : kPe;
+      next();
+      // The expansion: this pass's tokens, or with a latent cache every cached token, recomputed each pass.
       const wkvB = weight('self_attn.kv_b_proj.weight', latent, kvB,
         `The expansion: each head's K (${qkNopeDim} dims, no position) and V (${vHead}) from the ${kvLoraRank}-dim latent.`,
         { heads: along(kvHeads, 'z') });
-      // Each head's K joins its no-position part with the shared RoPE key; V is the rest of each head's kv columns.
-      const expandKv = (latentIn: string, keyIn: string, rows: Dim, kExtra: ActOptions, vExtra: ActOptions) => {
-        const kv = act('kv', `c_kv · W_kv_b: each head's K (no RoPE) and V${rows === tok ? '' : ', all cached tokens'}`, kvB,
-          { heads: kvHeads, rows, note: rows === tok ? TRANSIENT : `${TRANSIENT} Recomputed from the whole latent cache every pass.` });
-        matmul(latentIn, wkvB, kv, latent, kvB, { rows: rows.size, viz: { panel: 'mla', stage: 'expand' } });
-        next();
-        const k = act('k', `K = [k_nope, k_pe]: ${cfg.headDim} dims per head`, kvDim, { heads: kvHeads, rows, ...kExtra });
-        op('cat', [kv, keyIn], k,
-          `Joins each head's ${qkNopeDim}-dim K with the shared ${qkRopeDim}-dim RoPE key, broadcast to all ${cfg.nHeads} heads: a new tensor.`, ASSEMBLE);
-        const v = act('v', `V: the last ${vHead} of each head's kv columns`, oDim, { heads: kvHeads, rows, rowGap: STACK_GAP, ...vExtra });
-        op('split', [kv], v, `The V part of each head's ${qkNopeDim + vHead} kv columns: a view of kv, no copy.`, ASSEMBLE);
-        return { k, v };
-      };
-      if (latentCache) {
-        const cKvCached = cacheWrite(cKv, 'c_kv_cache', `latent cache, layer ${l}: c_kv`, 'latent', latent, undefined);
-        const kPeCached = cacheWrite(kPe, 'k_pe_cache', `latent cache, layer ${l}: k_pe`, 'RoPE key', ropeKey, undefined);
-        next();
-        const absorb = 'vLLM and SGLang expand like this in prefill; in decode they fold W_kv_b into the query and output ' +
-          'projections instead ("absorption") and attend over the latent directly, never building K and V.';
-        const kv = expandKv(cKvCached, kPeCached, keyRows, { note: `${TRANSIENT} ${absorb}` }, {});
-        kCached = kv.k;
-        vCached = kv.v;
-      } else {
-        // HF's FlashAttention path pads V to the Q and K head width before caching it; the eager path does not.
-        vPadded = o.attention === 'fused';
-        const vCachedWidth = vPadded ? kvDim : oDim;
-        const hfNote = ` HF caches K and V expanded: ${formatInt(kvDim.size + vCachedWidth.size)} values per token, against ${kvLoraRank + qkRopeDim} for the latent and RoPE key (see MLA cache).`;
-        const kv = expandKv(cKv, kPe, tok, { kind: kvKind, note: kvNote(hfNote) }, vPadded ? {} : { kind: kvKind, note: kvNote('') });
-        kCached = cacheWrite(kv.k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
-        let v = kv.v;
-        if (vPadded) {
-          v = act('v_pad', `V zero-padded to ${cfg.headDim} per head`, kvDim, {
-            heads: kvHeads, rowGap: STACK_GAP, kind: kvKind,
-            note: kvNote(` ${cfg.headDim - vHead} of each head's ${cfg.headDim} columns are zeros, cached too: a third of the V cache holds nothing.`),
-          });
-          op('pad', [kv.v], v, `F.pad appends ${cfg.headDim - vHead} zeros to each head's ${vHead}-dim V: FlashAttention needs one head width for Q, K and V. ` +
-            'The cache stores the padding too. Eager attention skips this.', PAD);
-        }
-        vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', vCachedWidth);
+      const rows = latentCache ? keyRows : tok;
+      const kv = act('kv', `c_kv · W_kv_b: each head's K (no RoPE) and V${latentCache ? ', all cached tokens' : ''}`, kvB,
+        { heads: kvHeads, rows, note: latentCache ? `${TRANSIENT} Recomputed from the whole latent cache every pass.` : TRANSIENT });
+      matmul(cKvCached, wkvB, kv, latent, kvB, { rows: rows.size, viz: { panel: 'mla', stage: 'expand' } });
+      next();
+      // K, then V, each in its own station with (HF) its cache in front of it, so the caches lie side by side.
+      // HF's FlashAttention path pads V to the Q and K head width before caching it; the eager path does not.
+      vPadded = !latentCache && o.attention === 'fused';
+      const vCachedWidth = vPadded ? kvDim : oDim;
+      const absorb = 'vLLM and SGLang expand like this in prefill; in decode they fold W_kv_b into the query and output ' +
+        'projections instead ("absorption") and attend over the latent directly, never building K and V.';
+      const hfNote = ` HF caches K and V expanded: ${formatInt(kvDim.size + vCachedWidth.size)} values per token, against ${kvLoraRank + qkRopeDim} for the latent and RoPE key (see MLA cache).`;
+      const k = act('k', `K = [k_nope, k_pe]: ${cfg.headDim} dims per head`, kvDim,
+        { heads: kvHeads, rows, ...(latentCache ? { note: `${TRANSIENT} ${absorb}` } : { kind: kvKind, note: kvNote(hfNote) }) });
+      op('cat', [kv, kPeCached], k,
+        `Joins each head's ${qkNopeDim}-dim K with the shared ${qkRopeDim}-dim RoPE key, broadcast to all ${cfg.nHeads} heads: a new tensor.`, ASSEMBLE);
+      kCached = latentCache ? k : cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
+      next();
+      let v = act('v', `V: the last ${vHead} of each head's kv columns`, oDim,
+        { heads: kvHeads, rows, ...(latentCache || vPadded ? {} : { kind: kvKind, note: kvNote('') }) });
+      op('split', [kv], v, `The V part of each head's ${qkNopeDim + vHead} kv columns: a view of kv, no copy.`, ASSEMBLE);
+      if (vPadded) {
+        const unpadded = v;
+        v = act('v_pad', `V zero-padded to ${cfg.headDim} per head`, kvDim, {
+          heads: kvHeads, rowGap: STACK_GAP, kind: kvKind,
+          note: kvNote(` ${cfg.headDim - vHead} of each head's ${cfg.headDim} columns are zeros, cached too: a third of the V cache holds nothing.`),
+        });
+        op('pad', [unpadded], v, `F.pad appends ${cfg.headDim - vHead} zeros to each head's ${vHead}-dim V: FlashAttention needs one head width for Q, K and V. ` +
+          'The cache stores the padding too. Eager attention skips this.', PAD);
       }
+      vCached = latentCache ? v : cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', vCachedWidth);
       next();
     } else {
       const wq = weight('self_attn.q_proj.weight', dModel, qDim, undefined, { heads: along(qHeads, 'z'), role: 'q' });
