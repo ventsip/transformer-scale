@@ -10,7 +10,8 @@
 
 ## Layout
 
-- One **floor** per stage: embedding, one per decoder layer, LM head. Floors stack along Y.
+- One **floor** per stage: embedding, one per decoder layer, LM head, and on top sampling (HF `generate`, not part of
+  the model: logits to the next token id; `to fp32` on the LM head floor sends the logits up). Floors stack along Y.
 - A layer floor has two **sections**: attention in front, MLP behind it. This keeps floors near 2.5:1
   instead of a 5.6:1 strip. A wide gap (10,240) separates the two, so they read as separate parts; in a mixture of
   experts the same gap separates the router row from the expert rows behind it. The dense MLP has the same shape as one
@@ -171,6 +172,6 @@
 
 - Models: Llama-3-8B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then
-  sampled as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
+  sampled on a floor of their own as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
 - Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
   parameters and are not drawn as objects.

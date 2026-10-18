@@ -134,7 +134,7 @@ function rebuild() {
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
-  const loop: [string, string] = [`${cfg.nLayers + 1}:next_token`, '0:input_ids'];
+  const loop: [string, string] = [`${cfg.nLayers + 2}:next_token`, '0:input_ids'];
   if (settings.showFlow) loop.forEach((id) => linked.add(id));
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection);
   flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection, loop);

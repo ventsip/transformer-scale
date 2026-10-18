@@ -20,7 +20,7 @@ export interface TensorSpec {
   id: string;
   label: string;
   kind: TensorKind;
-  /** 0 = embedding, 1..nLayers = decoder layers, nLayers + 1 = LM head. */
+  /** 0 = embedding, 1..nLayers = decoder layers, nLayers + 1 = LM head, nLayers + 2 = sampling. */
   floor: number;
   /** 0 = attention (front), 1 = MLP (behind it). */
   section: number;
@@ -147,11 +147,12 @@ const STACK_GAP = 2048;
 /** Extra space between experts of a mixture-of-experts layer, so each reads as a block. */
 const EXPERT_GAP = 8192;
 
-export const floorCount = (cfg: ModelConfig) => cfg.nLayers + 2;
+export const floorCount = (cfg: ModelConfig) => cfg.nLayers + 3;
 
 export function floorName(cfg: ModelConfig, floor: number): string {
   if (floor === 0) return 'Embedding';
   if (floor === cfg.nLayers + 1) return 'LM head';
+  if (floor === cfg.nLayers + 2) return 'Sampling';
   return `Layer ${floor - 1}`;
 }
 
@@ -615,14 +616,22 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     `Matrix multiply, last position only: [1 × ${cfg.dModel}] @ [${cfg.dModel} × ${cfg.vocabSize}]. ${formatFlops(2 * cfg.dModel * cfg.vocabSize)} FLOPs.`,
     2 * cfg.dModel * cfg.vocabSize);
 
-  // Sampling (HF generate): vocab-wide strips stacked in front of the logits, spaced so their ops have room.
-  const SAMPLING_GAP = 4096;
+  // Sampling floor (HF generate): not part of the model, it turns the logits into the next token. Vocab-wide strips,
+  // stacked, and spaced wide enough that the label of the op under the first strip (to fp32, from the floor below)
+  // clears the one above the second in the focus view.
+  floor = cfg.nLayers + 2;
+  section = 0;
+  station = 0;
+  const SAMPLING_GAP = 12288;
   const strip = (id: string, label: string, note: string) => push({
     id, label, kind: 'activation', x: cfg.vocabSize, z: 1, rowGap: SAMPLING_GAP,
     dims: [{ name: 'last token', size: 1 }, vocab], dtype: 'fp32', note,
   });
   const logits32 = strip('logits_fp32', 'logits in fp32', 'generate() copies the last logits to fp32 before any processing.');
-  op('to fp32', [logits], logits32, 'Upcast copy of the last position\'s logits.');
+  // The copy belongs to the LM head floor, like a layer's last add: it sends the logits up to this floor.
+  floor = cfg.nLayers + 1;
+  op('to fp32', [logits], logits32, 'Upcast copy of the last position\'s logits, handed to generate() for sampling.');
+  floor = cfg.nLayers + 2;
   const scaled = strip('scaled', 'logits / temperature', 'Temperature < 1 sharpens the distribution, > 1 flattens it.');
   op('÷ temperature', [logits32], scaled, 'Divides every logit by the temperature.');
   const filtered = strip('filtered', 'after top-k / top-p', 'Tokens outside the kept set are −∞.');
