@@ -275,21 +275,37 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
     if (picked !== null && picked >= kept) picked = null;
 
     const scaledShown = Array.from(scaled.subarray(0, SHOWN));
-    cLogits.draw({ values: input, lo: Math.min(0, ...input), hi: Math.max(...input), describe: (i) => `#${i + 1} · logit ${input[i].toFixed(2)}` });
+    // After the top SHOWN ranks, a gap band stands for the rest of the vocabulary (no bars: their logits sit far below).
+    const V = model.vocabSize;
+    const rest = V - SHOWN;
+    const withGap = <T>(xs: T[], fill: T) => [...xs, ...Array<T>(GAP_COLUMNS).fill(fill)];
+    const ranks = `ranks ${int(SHOWN + 1)}–${int(V)}: ${int(rest)} more tokens`;
+    const axis = {
+      gap: { at: SHOWN, columns: GAP_COLUMNS }, ticks: [0, 9, 19, 29, SHOWN + 1],
+      tickLabel: (i: number) => (i >= SHOWN ? `+${int(rest)}` : `#${i + 1}`),
+    };
+    const range = (xs: Float64Array) => `from ${xs[SHOWN].toFixed(1)} down to ${xs[V - 1].toFixed(1)}`;
+    cLogits.draw({
+      values: withGap(input, 0), lo: Math.min(0, ...input), hi: Math.max(...input), ...axis,
+      describe: (i) => (i >= SHOWN ? `${ranks}, logits ${range(logits)}` : `#${i + 1} · logit ${input[i].toFixed(2)}`),
+    });
     const sLo = Math.min(0, ...input, ...scaledShown);
     const sHi = Math.max(...input, ...scaledShown);
     cTemp.draw({
-      values: scaledShown, ghost: input, lo: sLo, hi: sHi,
-      describe: (i) => `#${i + 1} · ${input[i].toFixed(2)} ÷ ${t.toFixed(2)} = ${scaledShown[i].toFixed(2)}`,
+      values: withGap(scaledShown, 0), ghost: withGap(input, 0), lo: sLo, hi: sHi, ...axis,
+      describe: (i) => (i >= SHOWN ? `${ranks}, scaled ${range(scaled)}` : `#${i + 1} · ${input[i].toFixed(2)} ÷ ${t.toFixed(2)} = ${scaledShown[i].toFixed(2)}`),
     });
     cFilter.draw({
-      values: scaledShown, removed: scaledShown.map((_, i) => i >= kept), lo: sLo, hi: sHi,
-      describe: (i) => (i < kept ? `#${i + 1} · kept · ${scaledShown[i].toFixed(2)}` : `#${i + 1} · removed → −∞`),
+      values: withGap(scaledShown, 0), removed: withGap(scaledShown.map((_, i) => i >= kept), true), lo: sLo, hi: sHi, ...axis,
+      describe: (i) => (i >= SHOWN
+        ? `${ranks}: ${kept > SHOWN ? `${int(kept - SHOWN)} kept, the rest` : 'all'} removed → −∞`
+        : i < kept ? `#${i + 1} · kept · ${scaledShown[i].toFixed(2)}` : `#${i + 1} · removed → −∞`),
     });
     const shownProbs = scaledShown.map((_, i) => (i < kept ? probs[i] : 0));
+    const restMass = probs.slice(SHOWN).reduce((a, b) => a + b, 0);
     cSoft.draw({
-      values: shownProbs, lo: 0, hi: Math.max(...shownProbs), percent: true, picked,
-      describe: (i) => `#${i + 1} · p = ${pct(shownProbs[i])}`,
+      values: withGap(shownProbs, 0), lo: 0, hi: Math.max(...shownProbs), percent: true, picked, ...axis,
+      describe: (i) => (i >= SHOWN ? `${ranks}: together p = ${pct(restMass)}` : `#${i + 1} · p = ${pct(shownProbs[i])}`),
     });
 
     filterFacts.innerHTML =
@@ -335,8 +351,9 @@ const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 const silu = (x: number) => x * sigmoid(x);
 /** SiLU's minimum: x = −1.2785 solves 1 + x(1 − σ(x)) = 0. */
 const SILU_MIN_X = -1.2785;
-/** Features shown for one illustrative token. */
-const FEATURES = 32;
+/** Features of d_ffn shown for one illustrative token: the first GLU_HEAD and the last GLU_TAIL. */
+const GLU_HEAD = 24;
+const GLU_TAIL = 8;
 
 function swigluViz(body: HTMLElement, focus: GluStage): void {
   const sSilu = stageSection(body, focus === 'silu', 'SiLU(x) = x · σ(x)',
@@ -351,7 +368,8 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
 
   const sGate = stageSection(body, focus === 'gate', 'a = SiLU(g) ⊙ u',
     `Two projections of the same input: the gate g = x · W_gate and the up projection u = x · W_up. ` +
-    `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for ${FEATURES} of the d_ffn features of one token, all on one scale.`);
+    `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for one token, from both ends of its ` +
+    `${model.dFfn.toLocaleString('en-US')} d_ffn features, all on one scale.`);
   const resample = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
   row.append(resample);
@@ -365,25 +383,28 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
   function update() {
     const rand = rng(seed);
     const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
-    const g = Array.from({ length: FEATURES }, () => 1.6 * normal());
-    const u = Array.from({ length: FEATURES }, () => normal());
+    // Whole d_ffn vectors; the charts show both ends of them.
+    const gFull = Array.from({ length: model.dFfn }, () => 1.6 * normal());
+    const uFull = Array.from({ length: model.dFfn }, () => normal());
+    const ends = bothEnds(model.dFfn, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
+    const g = ends.values((k) => gFull[k]);
+    const u = ends.values((k) => uFull[k]);
     const sg = g.map(silu);
     const a = sg.map((v, i) => v * u[i]);
     const all = [...g, ...u, ...a];
     const lo = Math.min(...all);
     const hi = Math.max(...all);
-    const ticks = [0, 8, 16, 24, FEATURES - 1];
-    const tick = (i: number) => String(i);
     const f = (v: number) => v.toFixed(2);
-    cGate.draw({ values: sg, ghost: g, lo, hi, tickLabel: tick, ticks, describe: (i) => `feature ${i} · g = ${f(g[i])} → SiLU(g) = ${f(sg[i])}` });
-    cUp.draw({ values: u, lo, hi, tickLabel: tick, ticks, describe: (i) => `feature ${i} · u = ${f(u[i])}` });
-    cOut.draw({
-      values: a, ghost: u, lo, hi, tickLabel: tick, ticks,
-      describe: (i) => `feature ${i} · ${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`,
-    });
-    const closed = g.filter((v) => v < 0).length;
+    const axis = { lo, hi, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
+    const feature = (i: number) => `feature ${ends.index(i).toLocaleString('en-US')}`;
+    const describe = (text: (i: number) => string) => (i: number) => (ends.inGap(i) ? ends.gapText('features') : `${feature(i)} · ${text(i)}`);
+    cGate.draw({ values: sg, ghost: g, ...axis, describe: describe((i) => `g = ${f(g[i])} → SiLU(g) = ${f(sg[i])}`) });
+    cUp.draw({ values: u, ...axis, describe: describe((i) => `u = ${f(u[i])}`) });
+    cOut.draw({ values: a, ghost: u, ...axis, describe: describe((i) => `${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`) });
+    const closed = gFull.filter((v) => v < 0).length;
     facts.innerHTML =
-      `<b>${closed}</b> of ${FEATURES} gates are negative: SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
+      `<b>${closed.toLocaleString('en-US')}</b> of ${model.dFfn.toLocaleString('en-US')} gates are negative: ` +
+      `SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
       `so those features of u barely pass (and flip sign slightly). Positive gates pass u scaled by about g. ` +
       'Cheap in FLOPs, but g, u and a are each a full T × d_ffn tensor, several times wider than the residual stream.';
   }
@@ -619,8 +640,9 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
 // ---------------------------------------------------------------------------------------------
 // Mixture of experts: router softmax → top-k → renormalize; dispatch; weighted combine
 
-/** Features shown for an expert output. */
-const MOE_FEATURES = 24;
+/** Features of d_model shown for an expert output: the first MOE_HEAD and the last MOE_TAIL. */
+const MOE_HEAD = 18;
+const MOE_TAIL = 6;
 
 function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   const { nExperts: E, topK: K } = model.moe!;
@@ -669,7 +691,7 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   // 3. Combine.
   const sCombine = stageSection(body, focus === 'combine', 'Combine: m = Σ weight × expert output',
     `Each expert's output rows are scaled by their routing weights and added back at their tokens' positions (index_add_). ` +
-    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above.`);
+    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above, from both ends of their ${model.dModel.toLocaleString('en-US')} features.`);
   const cParts = Array.from({ length: K }, () => barChart('', ''));
   const cSum = barChart('m: the sum', 'outlines: the first expert alone');
   sCombine.append(...cParts.map((c) => c.root), cSum.root);
@@ -705,14 +727,18 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
       `The router is ${(model.dModel * E).toLocaleString('en-US')} parameters per layer, against ` +
       `${(3 * model.dModel * model.dFfn / 1e6).toFixed(0)}M in each expert.`;
 
-    // Illustrative expert outputs: different experts, different vectors.
-    const outputs = top.map(() => Array.from({ length: MOE_FEATURES }, () => normal()));
+    // Illustrative expert outputs (different experts, different vectors), whole d_model rows shown by both ends.
+    const ends = bothEnds(model.dModel, MOE_HEAD, MOE_TAIL, [0, 8]);
+    const outputs = top.map(() => {
+      const full = Array.from({ length: model.dModel }, () => normal());
+      return ends.values((f) => full[f]);
+    });
     const parts = outputs.map((y, k) => y.map((v) => v * weights[top[k]]));
     const total = parts[0].map((_, i) => parts.reduce((a, p) => a + p[i], 0));
     const all = [...outputs.flat(), ...parts.flat(), ...total];
-    const lo = Math.min(...all);
-    const hi = Math.max(...all);
-    const ticks = [0, 8, 16, MOE_FEATURES - 1];
+    const axis = { lo: Math.min(...all), hi: Math.max(...all), gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
+    const describe = (text: (i: number) => string) => (i: number) =>
+      (ends.inGap(i) ? ends.gapText('features') : `feature ${ends.index(i).toLocaleString('en-US')} · ${text(i)}`);
     parts.forEach((p, k) => {
       const e = top[k];
       cParts[k].root.querySelector('figcaption')?.remove();
@@ -720,13 +746,13 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
       caption.append(el('span', { textContent: `outlines: E${e}'s output before scaling` }));
       cParts[k].root.prepend(caption);
       cParts[k].draw({
-        values: p, ghost: outputs[k], lo, hi, ticks, tickLabel: String,
-        describe: (i) => `feature ${i} · ${weights[e].toFixed(3)} × ${outputs[k][i].toFixed(2)} = ${p[i].toFixed(2)}`,
+        values: p, ghost: outputs[k], ...axis,
+        describe: describe((i) => `${weights[e].toFixed(3)} × ${outputs[k][i].toFixed(2)} = ${p[i].toFixed(2)}`),
       });
     });
     cSum.draw({
-      values: total, ghost: parts[0], lo, hi, ticks, tickLabel: String,
-      describe: (i) => `feature ${i} · ${parts.map((p) => p[i].toFixed(2)).join(' + ')} = ${total[i].toFixed(2)}`,
+      values: total, ghost: parts[0], ...axis,
+      describe: describe((i) => `${parts.map((p) => p[i].toFixed(2)).join(' + ')} = ${total[i].toFixed(2)}`),
     });
   }
   another.addEventListener('click', () => {
@@ -744,8 +770,6 @@ const LOOKUP_WORDS = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'the',
 /** Features of the selected row shown as bars: the first ROW_HEAD and the last ROW_TAIL. */
 const ROW_HEAD = 36;
 const ROW_TAIL = 12;
-/** Width of the gap between them, in columns: wide enough to notice. */
-const ROW_GAP = 3;
 
 /**
  * The prompt as (token, id) pairs. The beginning-of-text ids are the real ones (Llama 3: 128000, Mixtral: 1);
@@ -860,26 +884,18 @@ function lookupViz(body: HTMLElement): void {
     const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
     // The whole row (embedding entries are small numbers, a few hundredths); the chart shows both ends of it.
     const row = Array.from({ length: model.dModel }, () => 0.02 * normal());
-    const d = model.dModel;
-    const hidden = d - ROW_HEAD - ROW_TAIL;
-    // Columns: the first ROW_HEAD features, ROW_GAP gap columns, the last ROW_TAIL.
-    const cols = ROW_HEAD + ROW_GAP + ROW_TAIL;
-    const inGap = (i: number) => i >= ROW_HEAD && i < ROW_HEAD + ROW_GAP;
-    const feature = (i: number) => (i < ROW_HEAD ? i : d - (cols - i));
-    const values = Array.from({ length: cols }, (_, i) => (inGap(i) ? 0 : row[feature(i)]));
-    const gapTick = ROW_HEAD + Math.floor(ROW_GAP / 2);
+    const ends = bothEnds(model.dModel, ROW_HEAD, ROW_TAIL, [0, 16, 32]);
+    const values = ends.values((f) => row[f]);
     const span = Math.max(...values.map(Math.abs));
     cRow.root.querySelector('figcaption')?.remove();
     const caption = el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` });
-    caption.append(el('span', { textContent: `all ${d.toLocaleString('en-US')} features: the first ${ROW_HEAD}, … ${hidden.toLocaleString('en-US')} more …, the last ${ROW_TAIL}` }));
+    caption.append(el('span', {
+      textContent: `all ${model.dModel.toLocaleString('en-US')} features: the first ${ROW_HEAD}, … ${ends.hidden.toLocaleString('en-US')} more …, the last ${ROW_TAIL}`,
+    }));
     cRow.root.prepend(caption);
     cRow.draw({
-      values, lo: -span, hi: span, gap: { at: ROW_HEAD, columns: ROW_GAP },
-      ticks: [0, 16, 32, gapTick, cols - 1],
-      tickLabel: (i) => (inGap(i) ? `+${hidden.toLocaleString('en-US')}` : feature(i).toLocaleString('en-US')),
-      describe: (i) => (inGap(i)
-        ? `features ${ROW_HEAD.toLocaleString('en-US')}–${(d - ROW_TAIL - 1).toLocaleString('en-US')}: ${hidden.toLocaleString('en-US')} not shown`
-        : `feature ${feature(i).toLocaleString('en-US')} · ${values[i].toFixed(4)}`),
+      values, lo: -span, hi: span, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel,
+      describe: (i) => (ends.inGap(i) ? ends.gapText('features') : `feature ${ends.index(i).toLocaleString('en-US')} · ${values[i].toFixed(4)}`),
     });
   }
   update();
@@ -1347,6 +1363,34 @@ function tickText(v: number, step: number): string {
   if (a >= 1e6) return `${+(v / 1e6).toPrecision(3)}M`;
   if (a >= 1e4) return `${+(v / 1e3).toPrecision(3)}K`;
   return v.toFixed(Math.max(0, -Math.floor(Math.log10(step))));
+}
+
+/** Width of a gap band in a bar chart, in columns: wide enough to notice. */
+const GAP_COLUMNS = 3;
+
+/**
+ * Columns for a vector too long to draw whole: its first `head` and last `tail` entries around a gap band that stands
+ * for the rest. `ticks` labels the columns with real indices, and the gap with how many entries it hides.
+ */
+function bothEnds(length: number, head: number, tail: number, headTicks: number[]) {
+  const cols = head + GAP_COLUMNS + tail;
+  const inGap = (i: number) => i >= head && i < head + GAP_COLUMNS;
+  /** The vector index a (non-gap) column shows. */
+  const index = (i: number) => (i < head ? i : length - (cols - i));
+  const hidden = length - head - tail;
+  const int = (n: number) => n.toLocaleString('en-US');
+  return {
+    cols,
+    inGap,
+    index,
+    hidden,
+    gap: { at: head, columns: GAP_COLUMNS },
+    ticks: [...headTicks, head + Math.floor(GAP_COLUMNS / 2), cols - 1],
+    tickLabel: (i: number) => (inGap(i) ? `+${int(hidden)}` : int(index(i))),
+    /** The columns' values from a function of the vector index; the gap gets 0 (it draws no bars). */
+    values: (f: (index: number) => number) => Array.from({ length: cols }, (_, i) => (inGap(i) ? 0 : f(index(i)))),
+    gapText: (what: string) => `${what} ${int(head)}–${int(length - tail - 1)}: ${int(hidden)} not shown`,
+  };
 }
 
 /**

@@ -52,7 +52,7 @@
   numbers are computed over the whole vocabulary.
 - **SwiGLU** (opened from `SiLU ⊙`, or in expanded mode `SiLU` and `⊙`; in Llama and in every Mixtral expert): SiLU(x) =
   x·σ(x) as a line against a dashed ReLU reference, with a hover crosshair and its minimum (−0.278 at x ≈ −1.28)
-  marked; then illustrative g, u and a = SiLU(g) ⊙ u for 32 features of one token on one shared scale (outlines show
+  marked; then illustrative g, u and a = SiLU(g) ⊙ u for one token, both ends of its d_ffn features, on one shared scale (outlines show
   each input), with a button to draw another token.
 - **RMSNorm** (opened from `RMSNorm`, or any step of the expanded chain; identified by output id, since labels like
   `× weight` repeat elsewhere): one illustrative 64-feature token with two outlier features and a scale slider; x² with
@@ -71,7 +71,10 @@
 - **Mixture of experts** (opened from the router ops, any `gather (E…)`, or `index_add` / the expanded `× weight`):
   one illustrative token's router logits, softmax with the top 2 kept and their renormalized weights; the tokens each
   expert receives in this layer and pass, from the same seeded routing the scene draws (or the 2 experts the new token
-  uses, in decode); and the combine, two weighted expert outputs summing to m.
+  uses, in decode); and the combine, two weighted expert outputs summing to m (both ends of d_model).
+- **Long vectors** in popup charts are shown by both ends: the first and last entries around a 3-column gap band
+  labeled with how many it hides (+4,048 of a 4,096 row), with real indices on the axis. Sampling charts end in a gap
+  band for the vocabulary past rank 40, whose tooltip describes those tokens at that step.
 
 ## Attention heads
 
