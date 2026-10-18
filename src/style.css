@@ -497,3 +497,10 @@ button.play {
 .op-popup-control input[type='checkbox'] {
   flex: none;
 }
+
+/* The op at the end of a hovered pipe. */
+.op-label.highlight {
+  color: #0b0d12;
+  background: #f8fafc;
+  border-color: #f8fafc;
+}

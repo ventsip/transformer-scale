@@ -10,7 +10,7 @@ import {
   buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
-import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter } from './scene/flowScene';
+import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter, type Edge } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { createControls, maxTokens, type Settings } from './ui/controls';
 import { setPopupContext } from './ui/opPopup';
@@ -68,13 +68,13 @@ controls.enableDamping = true;
 controls.zoomToCursor = true;
 controls.zoomSpeed = 4;
 controls.maxDistance = 5e6;
-// For poking at the scene from the console during development.
-if (import.meta.env.DEV) Object.assign(window, { camera, controls });
 
 const tensors = new TensorScene();
 scene.add(tensors.group);
 const flow = new FlowScene((f) => floorName(cfg, f), renderer.domElement);
 scene.add(flow.group);
+// For poking at the scene from the console during development.
+if (import.meta.env.DEV) Object.assign(window, { camera, controls, flow });
 
 // Floor labels, recreated when the model changes.
 let floorLabels: CSS2DObject[] = [];
@@ -371,9 +371,8 @@ document.getElementById('legend')!.innerHTML = [
 const tooltip = document.getElementById('tooltip')!;
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-let hovered: Pick | null = null;
 
-function pickAt(e: PointerEvent): Pick | null {
+function pickAt(e: PointerEvent) {
   pointer.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
   return tensors.pick(raycaster);
@@ -414,6 +413,31 @@ function headLine({ item, box, head }: Pick): string {
   return `<div class="tt-head">${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
 }
 
+function placeTooltip(e: PointerEvent) {
+  tooltip.hidden = false;
+  const x = Math.min(e.clientX + 16, window.innerWidth - tooltip.offsetWidth - 8);
+  const y = Math.min(e.clientY + 16, window.innerHeight - tooltip.offsetHeight - 8);
+  tooltip.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+function showEdgeTooltip(edge: Edge, e: PointerEvent) {
+  tooltip.innerHTML = `
+    <div class="tt-title">${edge.text}</div>
+    <div>carries <b>${formatBytes(edge.bytes)}</b></div>
+    <div class="tt-note">Pipe width grows with the log of the bytes: ${formatInt(Math.round(edge.diameter))} units across.</div>`;
+  placeTooltip(e);
+}
+
+/** The whole extent of a tensor: all its tiles and head bands in one box. */
+function extentOf(id: string): Box | null {
+  const p = placed.find((q) => q.spec.id === id);
+  if (!p) return null;
+  const box = boundsOf([p]);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  return { cx: center.x, cy: center.y, cz: center.z, sx: size.x, sy: size.y, sz: size.z };
+}
+
 function showTooltip(p: Pick, e: PointerEvent) {
   const s = p.item.spec;
   const dims = s.dims.map((d) => `${d.name} ${formatInt(d.size)}`).join(' × ');
@@ -427,20 +451,27 @@ function showTooltip(p: Pick, e: PointerEvent) {
     ${rowLine(p)}
     <div class="tt-share">${share(s)}</div>
     ${s.note ? `<div class="tt-note">${s.note}</div>` : ''}`;
-  tooltip.hidden = false;
-  const x = Math.min(e.clientX + 16, window.innerWidth - tooltip.offsetWidth - 8);
-  const y = Math.min(e.clientY + 16, window.innerHeight - tooltip.offsetHeight - 8);
-  tooltip.style.transform = `translate(${x}px, ${y}px)`;
+  placeTooltip(e);
 }
 
+// Hover: a block, or a flow pipe with its endpoints (the tensor and the op), whichever is nearer.
 renderer.domElement.addEventListener('pointermove', (e) => {
-  hovered = pickAt(e);
-  tensors.setHighlight(hovered?.box ?? null);
-  if (hovered) showTooltip(hovered, e);
+  const block = pickAt(e);
+  const pipe = settings.showFlow ? flow.pickEdge(camera, e.clientX, e.clientY) : null;
+  if (pipe && (!block || pipe.distance < block.distance)) {
+    flow.setHover(pipe.edge);
+    tensors.setHighlight(pipe.edge.tensors.map(extentOf).filter((b): b is Box => b !== null));
+    showEdgeTooltip(pipe.edge, e);
+    return;
+  }
+  flow.setHover(null);
+  tensors.setHighlight(block ? [block.box] : []);
+  if (block) showTooltip(block, e);
   else tooltip.hidden = true;
 });
 renderer.domElement.addEventListener('pointerleave', () => {
-  tensors.setHighlight(null);
+  flow.setHover(null);
+  tensors.setHighlight([]);
   tooltip.hidden = true;
 });
 

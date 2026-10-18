@@ -90,19 +90,16 @@ export class TensorScene {
   private readonly edgeMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
   private meshes: { mesh: THREE.InstancedMesh; picks: Pick[] }[] = [];
   private edges?: THREE.LineSegments;
-  private readonly highlight: THREE.LineSegments;
+  /** Outlines of hovered boxes: one for a block, the tensor at the end of a pipe. Grown on demand. */
+  private readonly highlights: THREE.LineSegments[] = [];
+  private readonly highlightGeometry: THREE.EdgesGeometry;
+  private readonly highlightMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true });
   private focusFloor = -1;
   private selection: HeadSelection | null = null;
   private readonly groupColor = new THREE.Color();
 
   constructor() {
-    this.highlight = new THREE.LineSegments(
-      new THREE.EdgesGeometry(this.unitBox),
-      new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }),
-    );
-    this.highlight.renderOrder = 10;
-    this.highlight.visible = false;
-    this.group.add(this.highlight);
+    this.highlightGeometry = new THREE.EdgesGeometry(this.unitBox);
   }
 
   /** Floors other than `focusFloor` are drawn dimmed, and so are head bands off the selected head's path. */
@@ -128,20 +125,31 @@ export class TensorScene {
     this.addEdges([...solid, ...kept, ...masked]);
   }
 
-  pick(raycaster: THREE.Raycaster): Pick | null {
+  /** The nearest box under the ray, with its distance from the ray's origin. */
+  pick(raycaster: THREE.Raycaster): (Pick & { distance: number }) | null {
     const hits = raycaster.intersectObjects(this.meshes.map((m) => m.mesh), false);
     for (const hit of hits) {
       const entry = this.meshes.find((m) => m.mesh === hit.object);
-      if (entry && hit.instanceId !== undefined) return entry.picks[hit.instanceId];
+      if (entry && hit.instanceId !== undefined) return { ...entry.picks[hit.instanceId], distance: hit.distance };
     }
     return null;
   }
 
-  setHighlight(box: Box | null): void {
-    this.highlight.visible = box !== null;
-    if (!box) return;
-    this.highlight.position.set(box.cx, box.cy, box.cz);
-    this.highlight.scale.set(box.sx, Math.max(box.sy, 1), box.sz);
+  /** Outlines `boxes` in white, drawn over everything; an empty list clears the highlight. */
+  setHighlight(boxes: Box[]): void {
+    while (this.highlights.length < boxes.length) {
+      const outline = new THREE.LineSegments(this.highlightGeometry, this.highlightMaterial);
+      outline.renderOrder = 10;
+      this.group.add(outline);
+      this.highlights.push(outline);
+    }
+    this.highlights.forEach((outline, i) => {
+      const box = boxes[i];
+      outline.visible = box !== undefined;
+      if (!box) return;
+      outline.position.set(box.cx, box.cy, box.cz);
+      outline.scale.set(box.sx, Math.max(box.sy, 1), box.sz);
+    });
   }
 
   private colorOf({ item, head, part, rows }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
@@ -210,6 +218,6 @@ export class TensorScene {
       this.edges.geometry.dispose();
       this.edges = undefined;
     }
-    this.highlight.visible = false;
+    this.setHighlight([]);
   }
 }

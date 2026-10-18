@@ -101,10 +101,32 @@ export function pipeDiameter(bytes: number): number {
   return steps * WIDTH_UNIT;
 }
 
-interface Edge {
+/** What a pipe connects: the tensor(s) at its ends, the op label at the other end, and how to describe it. */
+interface Ends {
+  tensors: string[];
+  label: HTMLElement | null;
+  text: string;
+}
+
+export interface Edge extends Ends {
   curve: THREE.Curve<THREE.Vector3>;
   diameter: number;
+  bytes: number;
+  tube: THREE.Mesh;
+  material: THREE.Material;
+  /** Samples along the curve, for picking in screen space. */
+  points: THREE.Vector3[];
 }
+
+/** A pipe under the pointer, and how far from the camera. */
+export interface EdgeHit {
+  edge: Edge;
+  distance: number;
+}
+
+/** Pipes within this many pixels of the pointer count as hovered: thin pipes are about a pixel wide. */
+const PICK_PIXELS = 6;
+const HOVER_COLOR = 0xffffff;
 
 /**
  * Draws operations of the focused floor as labels, with pipes from inputs to op to output whose thickness
@@ -122,6 +144,9 @@ export class FlowScene {
   private tubes: THREE.Mesh[] = [];
   private dots?: THREE.InstancedMesh;
   private labels: CSS2DObject[] = [];
+  private readonly hoverMaterial = new THREE.MeshBasicMaterial({ color: HOVER_COLOR });
+  private hovered: Edge | null = null;
+  private readonly projected = new THREE.Vector3();
   private readonly matrix = new THREE.Matrix4();
   private readonly point = new THREE.Vector3();
 
@@ -137,29 +162,29 @@ export class FlowScene {
     if (focusFloor === null) return;
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
 
-    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number, material = this.material(color)) => {
+    const draw = (curve: THREE.Curve<THREE.Vector3>, color: number, bytes: number, ends: Ends, material = this.material(color)) => {
       const diameter = pipeDiameter(bytes);
-      this.edges.push({ curve, diameter });
       // Long pipes (the generation loop, risers) need more segments to stay smooth through their bends.
       const segments = Math.min(MAX_SEGMENTS, Math.max(MIN_SEGMENTS, Math.ceil(curve.getLength() / UNITS_PER_SEGMENT)));
       const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, segments, diameter / 2, 8), material);
+      this.edges.push({ ...ends, curve, diameter, bytes, tube, material, points: curve.getPoints(Math.min(segments, 256)) });
       this.tubes.push(tube);
       this.group.add(tube);
     };
 
     /** Within a floor: an arc lifted in proportion to its length. */
-    const arc = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
+    const arc = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number, ends: Ends) => {
       // Straight up or down when there is nowhere to arc to.
-      if (Math.hypot(a.x - b.x, a.z - b.z) < 1) return draw(new THREE.LineCurve3(a, b), color, bytes);
+      if (Math.hypot(a.x - b.x, a.z - b.z) < 1) return draw(new THREE.LineCurve3(a, b), color, bytes, ends);
       const mid = a.clone().add(b).multiplyScalar(0.5);
       mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
-      draw(new THREE.QuadraticBezierCurve3(a, mid, b), color, bytes);
+      draw(new THREE.QuadraticBezierCurve3(a, mid, b), color, bytes, ends);
     };
 
     /** Between floors: leaves `a` heading straight up and enters `b` from below, heading up. */
-    const riser = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number) => {
+    const riser = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number, ends: Ends) => {
       const lift = Math.max((b.y - a.y) / 2, 2000);
-      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), color, bytes);
+      draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), color, bytes, ends);
     };
 
     const label = (text: string, pos: THREE.Vector3, className: string, title = '') => {
@@ -189,18 +214,20 @@ export class FlowScene {
       // The residual stream (into an op that produces it, and out of it) gets its own color.
       // Reads that branch off it (x into RMSNorm) and branch outputs joining it (o, m) keep their kind's color.
       const carriesStream = !!out.spec.residual;
+      const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
+      const div = label(text, pos, 'op-label', op.note);
       for (const p of inputs) {
         const color = carriesStream && p!.spec.residual ? RESIDUAL_COLOR : KIND_COLORS[p!.spec.kind].edge;
         const bytes = flowBytes(p!, sel, op.inputBytes?.[p!.spec.id]);
+        const ends = { tensors: [p!.spec.id], label: div, text: `${p!.spec.label} → ${text}` };
         // Inputs from a lower floor (RoPE tables), and inputs of an op that sits under a higher floor, rise into it.
-        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, color, bytes);
-        else arc(anchor(p!, sel), pos, color, bytes);
+        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, color, bytes, ends);
+        else arc(anchor(p!, sel), pos, color, bytes, ends);
       }
       const outColor = carriesStream ? RESIDUAL_COLOR : KIND_COLORS[out.spec.kind].edge;
       // The op sits right above its output (or right below it, across floors): a straight line into it.
-      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel));
-      const text = op.floor === focusFloor ? op.label : `${op.label} (${this.floorName(op.floor)})`;
-      const div = label(text, pos, 'op-label', op.note);
+      draw(new THREE.LineCurve3(pos, anchor(out, sel, crossFloor ? 'bottom' : 'top')), outColor, flowBytes(out, sel),
+        { tensors: [out.spec.id], label: div, text: `${text} → ${out.spec.label}` });
       if (hasViz(op)) {
         // Opens an interactive explanation; pointerdown is stopped so the click does not reach the scene.
         div.classList.add('has-viz');
@@ -227,15 +254,66 @@ Click for an interactive view.`;
         a, new THREE.Vector3(a.x, top, a.z), new THREE.Vector3(left, top, a.z),
         new THREE.Vector3(left, entry, b.z), new THREE.Vector3(b.x, entry, b.z), b,
       ], false, 'centripetal');
-      draw(path, LOOP_COLOR, byteCount(from.spec), this.loopMaterial);
-      label('next step: token → input_ids', new THREE.Vector3(left, (top + entry) / 2, b.z), 'op-label',
+      const div = label('next step: token → input_ids', new THREE.Vector3(left, (top + entry) / 2, b.z), 'op-label',
         'The sampled token id is the whole input of the next decode step: 8 bytes go around the loop, while every weight is read again.');
+      draw(path, LOOP_COLOR, byteCount(from.spec),
+        { tensors: [from.spec.id, to.spec.id], label: div, text: `${from.spec.label} → next step's ${to.spec.label}` }, this.loopMaterial);
     }
 
     if (this.edges.length === 0) return;
     this.dots = new THREE.InstancedMesh(this.dotGeometry, this.dotMaterial, this.edges.length * DOTS_PER_EDGE);
     this.dots.frustumCulled = false;
     this.group.add(this.dots);
+  }
+
+  /**
+   * The pipe nearest the pointer, in screen pixels, if within PICK_PIXELS (or its own half-width, for wide pipes).
+   * `x`, `y`: pointer position in CSS pixels; the camera's projection covers the whole window.
+   */
+  pickEdge(camera: THREE.PerspectiveCamera, x: number, y: number): EdgeHit | null {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const toScreen = (p: THREE.Vector3, out: THREE.Vector2) => {
+      this.projected.copy(p).project(camera);
+      // Behind the camera, or beyond the far plane.
+      if (Math.abs(this.projected.z) > 1) return false;
+      out.set(((this.projected.x + 1) / 2) * w, ((1 - this.projected.y) / 2) * h);
+      return true;
+    };
+    // Pixels per world unit at distance 1: a pipe of radius r at distance d spans r · scale / d pixels.
+    const scale = h / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+    const a = new THREE.Vector2();
+    const b = new THREE.Vector2();
+    let best: { edge: Edge; pixels: number; point: THREE.Vector3 } | null = null;
+    for (const edge of this.edges) {
+      for (let i = 1; i < edge.points.length; i++) {
+        if (!toScreen(edge.points[i - 1], a) || !toScreen(edge.points[i], b)) continue;
+        // Distance from the pointer to the segment a–b, and where along it.
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / len2)) : 0;
+        const pixels = Math.hypot(x - (a.x + t * dx), y - (a.y + t * dy));
+        const radius = ((edge.diameter / 2) * scale) / edge.points[i].distanceTo(camera.position);
+        if (pixels > Math.max(PICK_PIXELS, radius) || (best && pixels >= best.pixels)) continue;
+        best = { edge, pixels, point: edge.points[i - 1].clone().lerp(edge.points[i], t) };
+      }
+    }
+    return best && { edge: best.edge, distance: best.point.distanceTo(camera.position) };
+  }
+
+  /** Draws `edge` (or nothing, with null) as hovered: a bright pipe and a lit op label. */
+  setHover(edge: Edge | null): void {
+    if (this.hovered === edge) return;
+    if (this.hovered) {
+      this.hovered.tube.material = this.hovered.material;
+      this.hovered.label?.classList.remove('highlight');
+    }
+    this.hovered = edge;
+    if (edge) {
+      edge.tube.material = this.hoverMaterial;
+      edge.label?.classList.add('highlight');
+    }
   }
 
   /** Flashes the generation loop: called once per decode step while generating. */
@@ -269,6 +347,7 @@ Click for an interactive view.`;
   }
 
   private clear(): void {
+    this.hovered = null;
     for (const label of this.labels) this.group.remove(label);
     this.labels = [];
     for (const tube of this.tubes) {
