@@ -59,6 +59,9 @@ export interface TensorSpec {
   /** A fused Q/K/V projection weight or bias (GPT-2's c_attn): the axis of its output dim, which holds Q, K and V in
    * equal thirds (Z for the weight, X for the bias). */
   fusedRoles?: 'x' | 'z';
+  /** Mixture of experts: a router tensor with one slice per expert along this axis (gate.weight's output dim, the
+   * columns of the router logits and probabilities). */
+  expertAxis?: 'x' | 'z';
   /** Mixture of experts: the expert this tensor belongs to. */
   expert?: number;
   /** Weights of an expert no token is routed to in this pass: never read, drawn dimmed. */
@@ -386,13 +389,15 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     prefix = block;
     const wr = weight('gate.weight', dModel, experts,
       `The router: scores all ${nExperts} experts for each token. ${formatCount(cfg.dModel * nExperts)} parameters, ` +
-      `against ${formatCount(3 * cfg.dModel * cfg.dFfn)} in each expert.`);
+      `against ${formatCount(3 * cfg.dModel * cfg.dFfn)} in each expert. Column e scores expert e.`);
+    tensors[tensors.length - 1].expertAxis = 'z';
     const routerLogits = act('router_logits', 'router_logits = h_norm · W_router', experts);
+    tensors[tensors.length - 1].expertAxis = 'x';
     matmul(hNorm, wr, routerLogits, dModel, experts);
     next();
     const routerProbs = push({
       id: 'router_probs', label: 'softmax(router_logits), fp32', kind: 'activation', x: nExperts, z: n,
-      dims: [tok, experts], dtype: 'fp32', note: `${TRANSIENT} Routing probabilities over the ${nExperts} experts.`,
+      dims: [tok, experts], dtype: 'fp32', expertAxis: 'x', note: `${TRANSIENT} Routing probabilities over the ${nExperts} experts.`,
     });
     op('softmax', [routerLogits], routerProbs, 'Softmax over the experts, computed in fp32.');
     next();

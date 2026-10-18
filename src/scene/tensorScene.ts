@@ -30,6 +30,8 @@ export interface Pick {
   rows: RowState;
   /** For Q, K and V projection weights (or a third of a fused one): which. */
   role: Role | null;
+  /** Mixture of experts: the expert this box belongs to (a router column, or an expert's tensor). */
+  expert: number | null;
   part: Part;
 }
 
@@ -37,6 +39,8 @@ export interface Pick {
 const GROUP_TINT = 0.3;
 /** Mix of the role color into the Q, K and V projection weights (before the group tint). */
 const ROLE_TINT = 0.5;
+/** Mix of an expert's hue into its tensors and its router column. */
+const EXPERT_TINT = 0.35;
 /** Brightness of head bands that are not on the selected head's path. */
 const OFF_PATH = 0.2;
 /** Brightness of the reserved, not yet written part of a preallocated buffer. */
@@ -103,6 +107,7 @@ export class TensorScene {
   private readonly highlightMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true });
   private focusFloor = -1;
   private selection: HeadSelection | null = null;
+  private expertSelection: number | null = null;
   private readonly groupColor = new THREE.Color();
 
   constructor() {
@@ -110,10 +115,11 @@ export class TensorScene {
   }
 
   /** Floors other than `focusFloor` are drawn dimmed, and so are head bands off the selected head's path. */
-  update(items: PlacedTensor[], focusFloor: number, selection: HeadSelection | null): void {
+  update(items: PlacedTensor[], focusFloor: number, selection: HeadSelection | null, expertSelection: number | null = null): void {
     this.clear();
     this.focusFloor = focusFloor;
     this.selection = selection;
+    this.expertSelection = expertSelection;
     const solid: Pick[] = [];
     const kept: Pick[] = [];
     const masked: Pick[] = [];
@@ -122,9 +128,10 @@ export class TensorScene {
         const head = item.heads[i];
         const rows = item.rows[i];
         const role = item.roles[i];
-        if (!item.spec.causal) return solid.push({ item, box, head, rows, role, part: 'box' });
-        kept.push({ item, box, head, rows, role, part: 'kept' });
-        masked.push({ item, box, head, rows, role, part: 'masked' });
+        const expert = item.experts[i];
+        if (!item.spec.causal) return solid.push({ item, box, head, rows, role, expert, part: 'box' });
+        kept.push({ item, box, head, rows, role, expert, part: 'kept' });
+        masked.push({ item, box, head, rows, role, expert, part: 'masked' });
       });
     }
     this.addInstanced(solid, this.unitBox, this.solidMaterial);
@@ -160,10 +167,15 @@ export class TensorScene {
     });
   }
 
-  private colorOf({ item, head, part, rows, role }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
+  private colorOf({ item, head, part, rows, role, expert }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
     out.setHex(part === 'masked' ? MASKED_COLORS[which] : KIND_COLORS[item.spec.kind][which]);
     // Q, K and V projection weights: blended toward their role color, under the KV-group tint.
     if (role) out.lerp(this.groupColor.setHex(ROLE_COLORS[role]), ROLE_TINT);
+    // Mixture of experts: each expert's tensors and its router column share a light tint; a selected expert dims the rest.
+    if (expert !== null) {
+      out.lerp(this.groupColor.setHSL(expertHue(expert), 0.7, 0.55), EXPERT_TINT);
+      if (this.expertSelection !== null && expert !== this.expertSelection) out.multiplyScalar(OFF_PATH);
+    }
     const split = item.spec.heads;
     if (split && head !== null) {
       const groups = split.count / split.perGroup;
@@ -249,3 +261,6 @@ export class TensorScene {
     this.setHighlight([]);
   }
 }
+
+/** A hue per expert, spread by the golden ratio so neighbors contrast however many experts there are. */
+export const expertHue = (expert: number) => (expert * 0.618034) % 1;

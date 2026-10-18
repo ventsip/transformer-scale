@@ -170,6 +170,11 @@
   active per token 12.9B, and decode reads ~26 GB per token instead of all ~93 GB.
 - Routing is **illustrative and seeded** (`src/model/routing.ts`): mild per-layer imbalance, and consecutive tokens
   repeat their first expert more often than chance, as the Mixtral paper observes. Real routing depends on the text.
+- **Sliced by expert**, like attention tensors by head: the router's `gate.weight` (one output column per expert)
+  and its logits and probabilities (one column per expert) are drawn as 8 slices. Each expert has its own hue, a light
+  tint on its router columns and on all its tensors, so router column e matches expert block e. Clicking a router
+  column or any tensor of an expert selects that expert across all layers and dims the others; Esc clears it.
+  `selected_experts` and `routing_weights` are per top-k slot, not per expert, so they stay whole.
 
 ## Honesty
 

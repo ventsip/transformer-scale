@@ -118,6 +118,8 @@ let parts: Part[] = [];
 let linked = new Set<string>();
 /** Selected attention head; it applies to every layer. */
 let selection: HeadSelection | null = null;
+/** Selected expert of a mixture of experts; it applies to every layer. */
+let expertSelection: number | null = null;
 
 const isVisible = (s: TensorSpec) =>
   !isTransient(s) || settings.activations === 'all' || s.floor === settings.focusFloor || linked.has(s.id);
@@ -138,7 +140,7 @@ function rebuild() {
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
   const loop: [string, string] = [`${cfg.nLayers + 2}:next_token`, '0:input_ids'];
   if (settings.showFlow) loop.forEach((id) => linked.add(id));
-  tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection);
+  tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection, expertSelection);
   flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection, loop);
   floorLabels.forEach((obj, f) => {
     obj.position.set(-4 * STATION_GAP, layout.floorY(f), 0);
@@ -301,6 +303,7 @@ function switchModel() {
   settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
   settings.focusFloor = Math.min(settings.focusFloor, floorCount(cfg) - 1);
   selection = null;
+  expertSelection = null;
   playing = false;
   createFloorLabels();
   ui = createUi();
@@ -353,6 +356,7 @@ function renderStats() {
   ];
   if (settings.attention === 'eager') rows.push(['Eager score tensors, one layer', formatBytes(stats.scoresBytes)]);
   if (selection) rows.push(['Selected head (Esc clears)', describeSelection(selection)]);
+  if (expertSelection !== null) rows.push(['Selected expert (Esc clears)', `E${expertSelection}`]);
   statsEl.replaceChildren(
     ...rows.map(([k, v]) => {
       const div = document.createElement('div');
@@ -435,6 +439,14 @@ function headLine({ item, box, head, role }: Pick): string {
   return `<div class="tt-head">${part}${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
 }
 
+/** For a router tensor's column: which expert it scores. */
+function expertLine({ item, box, expert }: Pick): string {
+  if (!item.spec.expertAxis || expert === null) return '';
+  const band = box.sx * box.sz;
+  return `<div class="tt-head">Expert ${expert}'s column: <b>${formatCount(band)}</b> elements · ` +
+    `<b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b> (click to select the expert)</div>`;
+}
+
 function placeTooltip(e: PointerEvent) {
   tooltip.hidden = false;
   const x = Math.min(e.clientX + 16, window.innerWidth - tooltip.offsetWidth - 8);
@@ -496,6 +508,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
     <div>${dims}</div>
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
     ${headLine(p)}
+    ${expertLine(p)}
     ${maskLine(p)}
     ${rowLine(p)}
     <div class="tt-share">${share(s)}</div>
@@ -573,8 +586,11 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   // A head band selects its head (a KV band its whole group); empty space clears the selection.
   const split = p?.item.spec.heads;
   const nextSelection = p && split && p.head !== null ? selectionFor(split, p.head) : p ? selection : null;
-  const selectionChanged = JSON.stringify(nextSelection) !== JSON.stringify(selection);
+  // An expert's tensor or router column selects that expert; empty space clears it too.
+  const nextExpert = p && p.expert !== null ? p.expert : p ? expertSelection : null;
+  const selectionChanged = JSON.stringify(nextSelection) !== JSON.stringify(selection) || nextExpert !== expertSelection;
   selection = nextSelection;
+  expertSelection = nextExpert;
   if (p && p.item.spec.floor !== settings.focusFloor) {
     settings.focusFloor = p.item.spec.floor;
     ui.refresh();
@@ -592,8 +608,9 @@ window.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
   if (e.key === 'f' || e.key === 'F') frameFocus();
   if (e.key === 'o' || e.key === 'O') overview();
-  if (e.key === 'Escape' && selection) {
+  if (e.key === 'Escape' && (selection || expertSelection !== null)) {
     selection = null;
+    expertSelection = null;
     rebuild();
   }
 });

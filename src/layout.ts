@@ -66,6 +66,8 @@ export interface PlacedTensor {
   rows: RowState[];
   /** The attention role (Q, K, V projection) of each box, for color coding; null for other tensors. */
   roles: (Role | null)[];
+  /** Mixture of experts: the expert of each box (its tensor's, or a router column's), or null. */
+  experts: (number | null)[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
 }
@@ -202,7 +204,20 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
             rows = parts.map((): RowState => 'written');
             boxes.splice(0, boxes.length, ...parts);
           }
-          local.push({ spec: s, boxes, heads, rows, roles, busZ: 0 });
+          // Each box's expert: its tensor's, or for a router tensor, the column it covers (one per expert).
+          let experts = boxes.map(() => s.expert ?? null);
+          if (s.expertAxis) {
+            const count = s.expertAxis === 'z' ? s.z : s.x;
+            const parts = boxes.flatMap((b) => Array.from({ length: count }, (_, e) => (s.expertAxis === 'z'
+              ? { ...b, cz: b.cz - b.sz / 2 + (e + 0.5) * (b.sz / count), sz: b.sz / count }
+              : { ...b, cx: b.cx - b.sx / 2 + (e + 0.5) * (b.sx / count), sx: b.sx / count })));
+            experts = parts.map((_, k) => k % count);
+            heads.splice(0, heads.length, ...parts.map(() => null));
+            roles = parts.map(() => null);
+            rows = parts.map((): RowState => 'written');
+            boxes.splice(0, boxes.length, ...parts);
+          }
+          local.push({ spec: s, boxes, heads, rows, roles, experts, busZ: 0 });
         }
         x0 += width + STATION_GAP;
       }
