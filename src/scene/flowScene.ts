@@ -110,6 +110,8 @@ interface Ends {
 
 export interface Edge extends Ends {
   curve: THREE.Curve<THREE.Vector3>;
+  /** The pipe's color, which its flow dots share. */
+  color: number;
   diameter: number;
   bytes: number;
   tube: THREE.Mesh;
@@ -173,7 +175,7 @@ export class FlowScene {
       // Long pipes (the generation loop, risers) need more segments to stay smooth through their bends.
       const segments = Math.min(MAX_SEGMENTS, Math.max(MIN_SEGMENTS, Math.ceil(curve.getLength() / UNITS_PER_SEGMENT)));
       const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, segments, diameter / 2, 8), material);
-      this.edges.push({ ...ends, curve, diameter, bytes, tube, material, points: curve.getPoints(Math.min(segments, 256)) });
+      this.edges.push({ ...ends, curve, color, diameter, bytes, tube, material, points: curve.getPoints(Math.min(segments, 256)) });
       this.tubes.push(tube);
       this.group.add(tube);
     };
@@ -269,6 +271,11 @@ Click for an interactive view.`;
     if (this.edges.length === 0) return;
     this.dots = new THREE.InstancedMesh(this.dotGeometry, this.dotMaterial, this.edges.length * DOTS_PER_EDGE);
     this.dots.frustumCulled = false;
+    // Each dot takes the color of the pipe it flows along.
+    const dotColor = new THREE.Color();
+    this.edges.forEach((edge, e) => {
+      for (let d = 0; d < DOTS_PER_EDGE; d++) this.dots!.setColorAt(e * DOTS_PER_EDGE + d, dotColor.setHex(edge.color));
+    });
     this.group.add(this.dots);
   }
 
