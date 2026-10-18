@@ -201,3 +201,14 @@
   sampled on a floor of their own as in HF `generate`: fp32 copy, temperature, top-k / top-p, softmax, and one int64 token id.
 - Simplifications: all weights share one dtype (no per-tensor quantization scales); RoPE, softmax and SiLU have no
   parameters and are not drawn as objects.
+
+## Code
+
+- **Data driven**: everything drawn comes from the model config and the settings. `src/model/tensors.ts` builds the
+  tensors and ops of a pass, giving each one all its fields when it is created: head splits, roles, expert, and for an
+  op its FLOPs, partial reads and popup panel (`viz`). Nothing downstream recognizes tensors or ops by id or label.
+- Floors and sections are named (`lmHeadFloor`, `samplingFloor`, `ATTENTION_SECTION`, ...), never computed inline.
+- Colors live in `src/palette.ts`: the scene uses them directly, the stylesheet as `--c-*` CSS variables.
+- Tuning values are named constants next to the code that uses them, with a comment on what they do.
+- Modules: `model/` (config, builder, stats, sections, routing), `layout.ts` (floor plan), `scene/` (tensors, flow
+  pipes, section trays), `camera.ts`, `tooltips.ts`, `statsPanel.ts`, `ui/` (settings, op popups), `main.ts` (wiring).
