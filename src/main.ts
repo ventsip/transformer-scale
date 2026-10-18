@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { formatBytes, formatCount, formatFlops, formatInt } from './format';
-import { STATION_GAP, THICKNESS_PER_BYTE, floorY, layoutTensors, type Box, type PlacedTensor } from './layout';
+import { STATION_GAP, THICKNESS_PER_BYTE, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
@@ -117,7 +117,8 @@ function rebuild() {
   stats = summarize(model, cfg);
   expertTokens = model.expertTokens;
   setVocabSize(cfg.vocabSize);
-  placed = layoutTensors(specs, settings);
+  const layout = layoutTensors(specs, settings);
+  placed = layout.placed;
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
@@ -126,7 +127,7 @@ function rebuild() {
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection);
   flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection, loop);
   floorLabels.forEach((obj, f) => {
-    obj.position.set(-4 * STATION_GAP, floorY(f, settings), 0);
+    obj.position.set(-4 * STATION_GAP, layout.floorY(f), 0);
     obj.element.classList.toggle('focused', f === settings.focusFloor);
   });
   renderStats();

@@ -17,6 +17,7 @@
   behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
 - Floors above the focused one are lifted and floors below it lowered, opening space around it; other floors are dimmed.
+  The gap grows with the deepest floor (1.5 × its depth, at least 40,000), so deep floors stay visible from the focus view.
 
 ## Data flow
 
@@ -91,11 +92,13 @@
 - Mixtral shares Llama-3-8B's attention, norms and dimensions; only the MLP differs, so switching models isolates MoE.
   Each layer has 8 SwiGLU experts (HF `MixtralSparseMoeBlock`), and each token runs through 2 of them.
 - The MLP section holds the router (`gate.weight`, 4096 × 8; router logits, fp32 softmax, top-2 expert ids and
-  renormalized routing weights), then the 8 experts **in one row**, each a block of three stations (w1, w3, w2)
-  separated by a wider gap, then `m`, where `index_add` sums the weighted expert outputs back into token order.
+  renormalized routing weights) and `m`, where `index_add` sums the weighted expert outputs back into token order.
+  Behind it the 8 experts form a **4 × 2 grid**, one section per row. Each expert is a near-square block of two
+  stations: w1 and w3 back to back (both read the same rows) with x, g and u in front, then w2 with a and y.
 - Per expert, `gather` copies the h_norm rows of its tokens; its activations have one row per routed token, so in
   prefill their depths show the load balance. An expert no token picks keeps its weights, dimmed, and gets no
-  activations, ops or reads. The layout does not depend on routing, so experts stay put while generating.
+  activations, ops or reads. Every expert reserves the width and depth of the busiest one, so the layout does not
+  depend on routing and experts stay put while generating.
 - In decode only 2 of 8 experts per layer light up, and the pair changes from token to token: parameters 46.7B,
   active per token 12.9B, and decode reads ~26 GB per token instead of all ~93 GB.
 - Routing is **illustrative and seeded** (`src/model/routing.ts`): mild per-layer imbalance, and consecutive tokens

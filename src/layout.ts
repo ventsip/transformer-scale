@@ -3,7 +3,7 @@ import type { TensorSpec } from './model/tensors';
 
 /**
  * Floor plan: 1 world unit = 1 element along X and Z.
- * A floor has one or two sections (attention in front, MLP behind). Each section lays its
+ * A floor has one or more sections (attention in front, MLP behind, rows of experts further back). Each section lays its
  * stations out left to right in data-flow order around a "bus" line: weights sit behind it (-Z),
  * the activations they produce in front of it (+Z). Operations sit on the bus.
  * Thickness (Y) is on its own, exaggerated scale: bytes per element.
@@ -17,8 +17,13 @@ const SECTION_GAP = 3072;
 const TILE_COLS = 8;
 export const THICKNESS_PER_BYTE = 64;
 
-/** Floors above the focused one are lifted by this much and floors below it lowered, opening space around it. */
-const FOCUS_GAP = 40000;
+/**
+ * Floors above the focused one are lifted and floors below it lowered, opening space around it: at least
+ * MIN_FOCUS_GAP, and enough for the deepest floor to stay clear of the one above when seen from the focus view
+ * (which looks down at about atan(1.5), see frameFocus in main.ts).
+ */
+const MIN_FOCUS_GAP = 40000;
+const FOCUS_GAP_PER_DEPTH = 1.5;
 
 export type ThicknessMode = 'bytes' | 'elements';
 
@@ -63,8 +68,14 @@ function thickness(s: TensorSpec, mode: ThicknessMode): number {
   return bytes * THICKNESS_PER_BYTE;
 }
 
-export const floorY = (floor: number, o: LayoutOptions) =>
-  floor * o.floorSpacing + Math.sign(floor - o.focusFloor) * FOCUS_GAP;
+const floorY = (floor: number, o: LayoutOptions, gap: number) =>
+  floor * o.floorSpacing + Math.sign(floor - o.focusFloor) * gap;
+
+export interface Layout {
+  placed: PlacedTensor[];
+  /** Height of a floor's base. */
+  floorY: (floor: number) => number;
+}
 
 const groupBy = <T, K>(items: T[], key: (t: T) => K) => {
   const map = new Map<K, T[]>();
@@ -72,10 +83,11 @@ const groupBy = <T, K>(items: T[], key: (t: T) => K) => {
   return [...map.entries()].sort(([a], [b]) => Number(a) - Number(b));
 };
 
-export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTensor[] {
+export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
   const placed: PlacedTensor[] = [];
   for (const [floor, floorSpecs] of groupBy(specs, (s) => s.floor)) {
-    const y = floorY(floor, o);
+    // Placed without the focus gap first: it depends on the floors' depths.
+    const y = floorY(floor, o, 0);
     // Back edge of the previous section; the next section's front edge goes behind it.
     let behind = 0;
     for (const [section, sectionSpecs] of groupBy(floorSpecs, (s) => s.section)) {
@@ -114,9 +126,9 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
             if (s.centered) xOffset = (stationWidth - t.width) / 2;
           }
           if (s.kind !== 'weight') last = { zMin, xEnd: xOffset + t.width };
-          width = Math.max(width, xOffset + t.width);
+          width = Math.max(width, xOffset + t.width, s.reserveWidth ?? 0);
           minZ = Math.min(minZ, zMin);
-          maxZ = Math.max(maxZ, zMin + t.depth);
+          maxZ = Math.max(maxZ, zMin + t.depth, ROW_GAP / 2 + (s.reserveFront ?? 0));
           const boxes: Box[] = [];
           const heads: (number | null)[] = [];
           for (let i = 0; i < s.tiles; i++) {
@@ -173,5 +185,20 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): PlacedTens
       placed.push(...local);
     }
   }
-  return placed;
+  const extent = new Map<number, { min: number; max: number }>();
+  for (const p of placed) {
+    const e = extent.get(p.spec.floor) ?? { min: Infinity, max: -Infinity };
+    for (const b of p.boxes) {
+      e.min = Math.min(e.min, b.cz - b.sz / 2);
+      e.max = Math.max(e.max, b.cz + b.sz / 2);
+    }
+    extent.set(p.spec.floor, e);
+  }
+  const depth = Math.max(0, ...[...extent.values()].map((e) => e.max - e.min));
+  const gap = Math.max(MIN_FOCUS_GAP, FOCUS_GAP_PER_DEPTH * depth);
+  for (const p of placed) {
+    const dy = Math.sign(p.spec.floor - o.focusFloor) * gap;
+    for (const b of p.boxes) b.cy += dy;
+  }
+  return { placed, floorY: (floor) => floorY(floor, o, gap) };
 }

@@ -57,6 +57,12 @@ export interface TensorSpec {
   idle?: boolean;
   /** Extra space before this tensor's station, e.g. between experts. */
   gapBefore?: number;
+  /**
+   * Room kept for this station whatever its activations, so the layout does not depend on them:
+   * depth in front of the bus, and width.
+   */
+  reserveFront?: number;
+  reserveWidth?: number;
 }
 
 /**
@@ -304,8 +310,9 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   /**
    * Sparse mixture of experts (HF MixtralSparseMoeBlock): a router picks the top-k experts per token; each expert
    * is a SwiGLU MLP run on the rows of its tokens only, and the outputs are summed back, weighted by the router.
-   * The experts lie in one row, each with its weights in three stations; an expert no token picks keeps its weights
-   * (dimmed) but gets no activations. Returns the tokens each expert receives.
+   * The router and the summed output `m` share a section; the experts form a grid behind it, one section per row,
+   * each expert a block of two stations (gate and up, then down). An expert no token picks keeps its weights (dimmed) but gets no
+   * activations. Returns the tokens each expert receives.
    */
   const moe = (l: number, h: string, hNorm: string): number[] => {
     const { nExperts, topK } = cfg.moe!;
@@ -338,9 +345,21 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     });
     op('÷ sum', [routerProbs], weights, `The top-${topK} probabilities divided by their sum, then cast to the activation dtype.`);
     next();
+    const m = push({
+      id: 'm', label: 'm = Σ routing weight × expert output', kind: 'activation', x: cfg.dModel, z: n, gapBefore: EXPERT_GAP,
+      dims: [tok, dModel], dtype: o.actDtype,
+      note: `${TRANSIENT} Starts as zeros; each expert adds its weighted rows into the rows of its tokens, so every row receives ${topK} contributions.`,
+    });
 
+    // Every expert reserves room for the busiest expert's activations, so experts keep their place whichever
+    // are active: the gate/up station is as wide as g and u, and the deepest station's stack sets each row's depth.
+    const expanded = o.elementwise === 'expanded';
+    const stackedRows = expanded ? 4 : 3;
+    const reserveFront = stackedRows * Math.max(...counts) + (stackedRows - 1) * STACK_GAP;
+    const cols = Math.ceil(Math.sqrt(2 * nExperts));
     const outputs: string[] = [];
     for (let e = 0; e < nExperts; e++) {
+      if (e % cols === 0) nextSection();
       const ne = counts[e];
       const idle = ne === 0;
       const rows: Dim = { name: `tokens routed to expert ${e}`, size: ne };
@@ -348,9 +367,9 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const share = idle
         ? `No token picks expert ${e} in this pass, so its weights are not read.`
         : `Expert ${e} of ${nExperts}: ${ne.toLocaleString('en-US')} of ${n.toLocaleString('en-US')} tokens routed here.`;
-      const expertWeight = (name: string, inDim: Dim, outDim: Dim, what: string, gapBefore?: number) => {
+      const expertWeight = (name: string, inDim: Dim, outDim: Dim, what: string, extra: Partial<TensorSpec> = {}) => {
         const id = weight(name, inDim, outDim, `${what} ${share}`);
-        Object.assign(tensors[tensors.length - 1], { expert: e, idle, gapBefore });
+        Object.assign(tensors[tensors.length - 1], { expert: e, idle, ...extra });
         return id;
       };
       /** An activation of this expert: one row per token routed to it, stacked in its station. */
@@ -358,27 +377,25 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         id: `e${e}.${id}`, label: `${label} (expert ${e})`, kind: 'activation', x: feat.size, z: ne, rowGap: STACK_GAP,
         dims: [rows, feat], dtype, expert: e, note: `${TRANSIENT} ${note}`,
       });
-      const w1 = expertWeight('w1.weight', dModel, ffn, 'Gate projection (W_gate).', EXPERT_GAP);
-      let xe = '', g = '';
+      // Gate and up projections read the same rows: their weights lie back to back in one station.
+      const w1 = expertWeight('w1.weight', dModel, ffn, 'Gate projection (W_gate).',
+        { reserveWidth: cfg.dFfn, reserveFront, ...(e % cols ? { gapBefore: EXPERT_GAP } : {}) });
+      const w3 = expertWeight('w3.weight', dModel, ffn, 'Up projection (W_up).');
+      let g = '', u = '';
       if (!idle) {
-        xe = expertAct('x', 'h_norm rows', dModel, o.actDtype, 'A copy of the h_norm rows of the tokens routed to this expert.');
+        const xe = expertAct('x', 'h_norm rows', dModel, o.actDtype, 'A copy of the h_norm rows of the tokens routed to this expert.');
         op(`gather (E${e})`, [hNorm, selected], xe,
           `Selects the ${ne.toLocaleString('en-US')} tokens whose top-${topK} includes expert ${e} and copies their rows (hidden_states[top_x]).`);
         g = expertAct('g', 'g = x · W_gate', ffn, o.actDtype, 'Gate activations.');
         matmul(xe, w1, g, dModel, ffn, ne);
-      }
-      next();
-      const w3 = expertWeight('w3.weight', dModel, ffn, 'Up projection (W_up).');
-      let u = '';
-      if (!idle) {
         u = expertAct('u', 'u = x · W_up', ffn, o.actDtype, 'Up activations.');
         matmul(xe, w3, u, dModel, ffn, ne);
       }
       next();
-      const w2 = expertWeight('w2.weight', ffn, dModel, 'Down projection (W_down).');
+      const w2 = expertWeight('w2.weight', ffn, dModel, 'Down projection (W_down).', { reserveFront });
       if (!idle) {
         let a: string;
-        if (o.elementwise === 'expanded') {
+        if (expanded) {
           const sg = expertAct('silu_g', 'SiLU(g)', ffn, o.actDtype, 'SiLU of the gate, its own tensor.');
           op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise.');
           a = expertAct('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, 'The SwiGLU gate.');
@@ -389,7 +406,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         }
         const y = expertAct('y', 'y = a · W_down', dModel, o.actDtype, "This expert's output for its tokens.");
         matmul(a, w2, y, ffn, dModel, ne);
-        if (o.elementwise === 'expanded') {
+        if (expanded) {
           const ys = expertAct('ys', 'y × routing weight', dModel, o.actDtype, 'Each row scaled by its routing weight for this expert.');
           op('× weight', [y, weights], ys, "Multiplies each token's row by the routing weight it gave this expert.");
           outputs.push(ys);
@@ -400,15 +417,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       next();
     }
 
-    prefix = block;
-    const m = push({
-      id: 'm', label: 'm = Σ routing weight × expert output', kind: 'activation', x: cfg.dModel, z: n, gapBefore: EXPERT_GAP,
-      dims: [tok, dModel], dtype: o.actDtype,
-      note: `${TRANSIENT} Starts as zeros; each expert adds its weighted rows into the rows of its tokens, so every row receives ${topK} contributions.`,
-    });
-    const compact = o.elementwise === 'compact';
-    op(compact ? '× weight, index_add' : 'index_add', compact ? [...outputs, weights] : outputs, m,
-      `${compact ? 'Scales each expert output row by its routing weight, then ' : ''}index_add_ adds the rows back at their tokens' positions. ` +
+    op(expanded ? 'index_add' : '× weight, index_add', expanded ? outputs : [...outputs, weights], m,
+      `${expanded ? '' : 'Scales each expert output row by its routing weight, then '}index_add_ adds the rows back at their tokens' positions. ` +
       `${outputs.length} of ${nExperts} experts contribute in this pass.`);
     op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");
     return counts;
