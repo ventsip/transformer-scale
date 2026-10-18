@@ -551,3 +551,23 @@ button.play {
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }
+
+/* Section trays on the focused floor: a quiet name at each tray's front-left corner. */
+.section-label {
+  padding: 0 0 2px 4px;
+  color: #a7b3c6;
+  font: 600 11px/1.2 ui-monospace, Consolas, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.section-label.expert {
+  color: #d9bb94;
+  font-size: 10px;
+}
+
+.section-label.idle {
+  opacity: 0.45;
+}

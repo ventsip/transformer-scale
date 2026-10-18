@@ -12,6 +12,8 @@ import {
 } from './model/tensors';
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter, type Edge } from './scene/flowScene';
 import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
+import { SectionScene } from './scene/sectionScene';
+import { floorParts, type Part } from './model/sections';
 import { createControls, maxTokens, type Settings } from './ui/controls';
 import { setPopupContext } from './ui/opPopup';
 
@@ -71,6 +73,9 @@ controls.maxDistance = 5e6;
 
 const tensors = new TensorScene();
 scene.add(tensors.group);
+// Trays under the sections of the focused floor.
+const sections = new SectionScene();
+scene.add(sections.group);
 const flow = new FlowScene((f) => floorName(cfg, f), renderer.domElement);
 scene.add(flow.group);
 // For poking at the scene from the console during development.
@@ -104,6 +109,8 @@ let focusY = 0;
 let stats: Stats;
 /** Mixture of experts: tokens routed to each expert, per decoder layer. */
 let expertTokens: number[][] | undefined;
+/** Sections of the focused floor (attention, MLP or router and experts), for its trays. */
+let parts: Part[] = [];
 
 /** Tensors on other floors that the focused floor's data flow links to. */
 let linked = new Set<string>();
@@ -122,6 +129,8 @@ function rebuild() {
   const layout = layoutTensors(specs, settings);
   placed = layout.placed;
   focusY = layout.floorY(settings.focusFloor);
+  parts = floorParts(cfg, model, settings.focusFloor);
+  sections.update(parts, placed);
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
@@ -423,6 +432,33 @@ function placeTooltip(e: PointerEvent) {
   tooltip.style.transform = `translate(${x}px, ${y}px)`;
 }
 
+/** Totals of a section of the focused floor: parameters and their share, memory, and this pass's work. */
+function showPartTooltip(part: Part, e: PointerEvent) {
+  // Shares are of the whole layer: its top-level parts (each expert is also inside "Experts").
+  const layer = parts.filter((p) => p.kind !== 'expert');
+  const sum = (f: (p: Part) => number) => layer.reduce((a, p) => a + f(p), 0);
+  const pct = (x: number, of: number) => (of > 0 ? `${((100 * x) / of).toPrecision(3)}%` : '–');
+  const pass = settings.mode === 'decode' ? 'this decode step' : 'the prompt';
+  const routed = part.expert !== undefined ? expertTokens?.[settings.focusFloor - 1]?.[part.expert] : undefined;
+  const rows: string[] = [
+    `<div><b>${formatCount(part.params)}</b> parameters · <b>${formatBytes(part.weightBytes)}</b></div>`,
+    `<div class="tt-head">${pct(part.params, sum((p) => p.params))} of this layer's parameters · ${pct(part.params, stats.params)} of the model's</div>`,
+    `<div>Transient activations: <b>${formatBytes(part.activationBytes)}</b></div>`,
+  ];
+  if (part.kvBytes > 0) rows.push(`<div>KV cache: <b>${formatBytes(part.kvBytes)}</b></div>`);
+  rows.push(
+    `<div>FLOPs for ${pass}: <b>${formatFlops(part.flops)}</b> (${pct(part.flops, sum((p) => p.flops))} of the layer)</div>`,
+    `<div>Weights + KV read: <b>${formatBytes(part.bytesRead)}</b> (${pct(part.bytesRead, sum((p) => p.bytesRead))} of the layer)</div>`,
+  );
+  if (routed !== undefined) {
+    rows.push(`<div class="tt-note">${part.idle ? 'No token is routed to this expert in this pass: its weights are not read.'
+      : `${formatInt(routed)} ${routed === 1 ? 'token is' : 'tokens are'} routed to this expert in this pass.`}</div>`);
+  }
+  tooltip.innerHTML = `<div class="tt-title">${part.name} · ${floorName(cfg, settings.focusFloor)}</div>
+    <div class="tt-kind">section</div>${rows.join('')}`;
+  placeTooltip(e);
+}
+
 function showEdgeTooltip(edge: Edge, e: PointerEvent) {
   tooltip.innerHTML = `
     <div class="tt-title">${edge.text}</div>
@@ -494,10 +530,15 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   }
   flow.setHover(null);
   tensors.setHighlight(block ? [block.box] : []);
+  // Over empty floor: the tray of the section under the pointer, if any.
+  const part = block ? null : sections.pick(raycaster);
+  sections.setHover(part);
   if (block) showTooltip(block, e);
+  else if (part) showPartTooltip(part, e);
   else tooltip.hidden = true;
 });
 renderer.domElement.addEventListener('pointerleave', () => {
+  sections.setHover(null);
   flow.setHover(null);
   tensors.setHighlight([]);
   tooltip.hidden = true;

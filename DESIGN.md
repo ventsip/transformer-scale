@@ -19,6 +19,12 @@
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
 - Floors above the focused one are lifted and floors below it lowered, opening space around it; other floors are dimmed.
   The gap grows with the focused floor's depth (1.5 × it, at least 40,000), so deep floors stay visible from the focus view.
+- **Section trays** (focused layer floor only): a thin translucent plate under each section, just below the floor and
+  a little larger than its blocks, in a muted tint (attention blue, MLP warm; Mixtral: router teal, experts warm, with
+  a nested tray per expert, fainter when idle), named at its front-left corner. Structure, not data: they are quieter
+  than any tensor. Hovering a tray over empty floor shows the section's totals: parameters and bytes with their share
+  of the layer and the model, transient activations, KV cache, and this pass's FLOPs and bytes read with their share
+  of the layer (`src/model/sections.ts`).
 
 ## Data flow
 
