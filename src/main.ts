@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { formatBytes, formatCount, formatFlops, formatInt } from './format';
-import { STATION_GAP, THICKNESS_PER_BYTE, layoutTensors, type Box, type PlacedTensor } from './layout';
+import { FOCUS_VIEW_SLOPE, STATION_GAP, THICKNESS_PER_BYTE, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
@@ -235,7 +235,7 @@ function frameBox(b: Box) {
 const overview = (instant = false) => frame(boundsOf(placed), new THREE.Vector3(0.45, 0.35, 1), instant);
 // Front and above: the focus gap keeps the floors overhead out of the line of sight.
 const frameFocus = () =>
-  frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0, 1.5, 1));
+  frame(boundsOf(placed.filter((p) => p.spec.floor === settings.focusFloor && isVisible(p.spec))), new THREE.Vector3(0, FOCUS_VIEW_SLOPE, 1));
 
 // Generation playback: each decode step adds one token to the cache.
 let playing = false;

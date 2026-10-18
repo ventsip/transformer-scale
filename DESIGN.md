@@ -19,7 +19,8 @@
   behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
 - Floors above the focused one are lifted and floors below it lowered, opening space around it; other floors are dimmed.
-  The gap grows with the focused floor's depth (1.5 × it, at least 40,000), so deep floors stay visible from the focus view.
+  The gap is the focused floor's depth (at least 24,000): the focus view looks down at 45°, so that keeps the floor above
+  out of the line of sight to the focused floor's back edge. One constant (FOCUS_VIEW_SLOPE) sets both.
 - **Section trays** (focused layer floor only): a thin translucent plate under each section, just below the floor and
   a little larger than its blocks, in a muted tint (attention blue, MLP warm; Mixtral: router teal, experts warm, with
   a nested tray per expert, fainter when idle), named at its front-left corner. Structure, not data: they are quieter
