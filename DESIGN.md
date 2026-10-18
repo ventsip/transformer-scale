@@ -41,7 +41,7 @@
 - **Embedding lookup** (opened from `lookup`): a 12-token prompt whose ids index rows of the table, drawn as a tall strip
   (row 0 at the top), each row copied into x; hover a token to follow it. Repeated words share a row. The BOS ids are
   real (Llama 3: 128000, Mixtral: 1), the rest illustrative. Below, the selected row: its first 36 and last 12 features,
-  with an ellipsis column standing for the rest, labeled with how many (4,048 of 4,096); then the real
+  with a 3-column ellipsis band standing for the rest, labeled with how many (4,048 of 4,096); then the real
   cost of the pass: rows read against the table size, with 0 FLOPs.
 
 - Clicking an op label that has an interactive view (accent border, pointer cursor) opens a popup explaining it.

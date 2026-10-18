@@ -741,9 +741,11 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
 // Embedding lookup: each token id selects one row of the table
 
 const LOOKUP_WORDS = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'the', 'mat', 'was', 'warm'];
-/** Features of the selected row shown as bars: the first ROW_HEAD and the last ROW_TAIL, with a gap between. */
+/** Features of the selected row shown as bars: the first ROW_HEAD and the last ROW_TAIL. */
 const ROW_HEAD = 36;
 const ROW_TAIL = 12;
+/** Width of the gap between them, in columns: wide enough to notice. */
+const ROW_GAP = 3;
 
 /**
  * The prompt as (token, id) pairs. The beginning-of-text ids are the real ones (Llama 3: 128000, Mixtral: 1);
@@ -860,19 +862,22 @@ function lookupViz(body: HTMLElement): void {
     const row = Array.from({ length: model.dModel }, () => 0.02 * normal());
     const d = model.dModel;
     const hidden = d - ROW_HEAD - ROW_TAIL;
-    // Columns: the first ROW_HEAD features, one gap column, the last ROW_TAIL.
-    const feature = (i: number) => (i < ROW_HEAD ? i : d - (ROW_HEAD + 1 + ROW_TAIL - i));
-    const values = Array.from({ length: ROW_HEAD + 1 + ROW_TAIL }, (_, i) => (i === ROW_HEAD ? 0 : row[feature(i)]));
+    // Columns: the first ROW_HEAD features, ROW_GAP gap columns, the last ROW_TAIL.
+    const cols = ROW_HEAD + ROW_GAP + ROW_TAIL;
+    const inGap = (i: number) => i >= ROW_HEAD && i < ROW_HEAD + ROW_GAP;
+    const feature = (i: number) => (i < ROW_HEAD ? i : d - (cols - i));
+    const values = Array.from({ length: cols }, (_, i) => (inGap(i) ? 0 : row[feature(i)]));
+    const gapTick = ROW_HEAD + Math.floor(ROW_GAP / 2);
     const span = Math.max(...values.map(Math.abs));
     cRow.root.querySelector('figcaption')?.remove();
     const caption = el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` });
     caption.append(el('span', { textContent: `all ${d.toLocaleString('en-US')} features: the first ${ROW_HEAD}, … ${hidden.toLocaleString('en-US')} more …, the last ${ROW_TAIL}` }));
     cRow.root.prepend(caption);
     cRow.draw({
-      values, lo: -span, hi: span, gap: ROW_HEAD,
-      ticks: [0, 16, 32, ROW_HEAD, ROW_HEAD + ROW_TAIL],
-      tickLabel: (i) => (i === ROW_HEAD ? `+${hidden.toLocaleString('en-US')}` : feature(i).toLocaleString('en-US')),
-      describe: (i) => (i === ROW_HEAD
+      values, lo: -span, hi: span, gap: { at: ROW_HEAD, columns: ROW_GAP },
+      ticks: [0, 16, 32, gapTick, cols - 1],
+      tickLabel: (i) => (inGap(i) ? `+${hidden.toLocaleString('en-US')}` : feature(i).toLocaleString('en-US')),
+      describe: (i) => (inGap(i)
         ? `features ${ROW_HEAD.toLocaleString('en-US')}–${(d - ROW_TAIL - 1).toLocaleString('en-US')}: ${hidden.toLocaleString('en-US')} not shown`
         : `feature ${feature(i).toLocaleString('en-US')} · ${values[i].toFixed(4)}`),
     });
@@ -1197,8 +1202,11 @@ interface Draw {
   values: number[];
   /** Horizontal reference lines, labeled at the right (or the left, with `start`). */
   refs?: { value: number; label: string; start?: boolean }[];
-  /** A column standing for values left out: drawn as an ellipsis, with no bar. */
-  gap?: number;
+  /**
+   * Columns standing for values left out, from `at`: drawn as one band with an ellipsis and no bars. Hovering it
+   * describes column `at`; a tick on its middle column labels it.
+   */
+  gap?: { at: number; columns: number };
   /** Label of the column ticks (default: rank, #1). */
   tickLabel?: (i: number) => string;
   /** Label of the value ticks (default: the value, compact). */
@@ -1256,27 +1264,29 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
 
     values.forEach((v, i) => {
       const cx = x0 + band * (i + 0.5);
-      if (i === gap) {
-        // Columns left out: an ellipsis on the baseline between two dashed lines, instead of a bar.
-        for (const x of [cx - band / 2, cx + band / 2]) {
+      if (gap && i >= gap.at && i < gap.at + gap.columns) {
+        if (i > gap.at) return;
+        // Values left out: one band over the gap's columns, with an ellipsis on the baseline between two dashed lines.
+        const left = x0 + band * gap.at;
+        const right = left + band * gap.columns;
+        const mid = (left + right) / 2;
+        for (const x of [left, right]) {
           plot.append(svg('line', { x1: x, x2: x, y1: pad.t, y2: H - pad.b, class: 'gap-line' }));
         }
-        const dots = svg('text', { x: cx, y: y(0) + 4, class: 'gap-mark', 'text-anchor': 'middle' });
+        const dots = svg('text', { x: mid, y: y(0) + 4, class: 'gap-mark', 'text-anchor': 'middle' });
         dots.textContent = '…';
         plot.append(dots);
-      }
-      const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : tone === 'weight' ? 'bar weight' : 'bar';
-      if (i === gap) {
-        const hit = svg('rect', { x: cx - band / 2, y: pad.t, width: band, height: H - pad.t - pad.b, class: 'hit' });
+        const hit = svg('rect', { x: left, y: pad.t, width: right - left, height: H - pad.t - pad.b, class: 'hit' });
         hit.addEventListener('pointerenter', () => {
           tip.textContent = describe(i);
           tip.hidden = false;
-          placeTip(tip, cx / W);
+          placeTip(tip, mid / W);
         });
         hit.addEventListener('pointerleave', () => (tip.hidden = true));
         plot.append(hit);
         return;
       }
+      const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : tone === 'weight' ? 'bar weight' : 'bar';
       plot.append(column(cx, barW, y(0), y(v), cls));
       // Outline on top, so it shows whether the bar is taller or shorter.
       if (ghost) plot.append(column(cx, barW, y(0), y(ghost[i]), 'ghost'));
