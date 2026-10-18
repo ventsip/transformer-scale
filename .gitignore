@@ -5,3 +5,6 @@ dist/
 .vscode/*
 !.vscode/extensions.json
 *.log
+coverage/
+playwright-report/
+test-results/

@@ -288,3 +288,7 @@
 - Tuning values are named constants next to the code that uses them, with a comment on what they do.
 - Modules: `model/` (config, builder, stats, sections, routing), `layout.ts` (floor plan), `scene/` (tensors, flow
   pipes, section trays), `camera.ts`, `tooltips.ts`, `statsPanel.ts`, `ui/` (settings, op popups), `main.ts` (wiring).
+- **Tests** (see the README): the builder is checked against numbers derived independently of it (published parameter
+  counts, HF cache semantics), not against itself; snapshots catch every other change for review. A new model needs
+  its published parameter count added to `tests/model/reference.test.ts` and `e2e/app.spec.ts`, and per-model test
+  files in `tests/model/graph/` and `tests/ui/popups/`.
