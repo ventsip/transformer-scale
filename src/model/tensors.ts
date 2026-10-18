@@ -409,7 +409,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     next();
     if (sw) {
       slidingMask = push({
-        id: 'sliding_mask', label: 'sliding_window_mask', kind: 'activation', x: n, z: n, causal: true, window: sw.size, dtype: o.actDtype, dims: maskDims,
+        id: 'sliding_mask', label: 'sliding_window_mask', kind: 'activation', x: n, z: n, causal: true, ...(sw.size < n ? { window: sw.size } : {}), dtype: o.actDtype, dims: maskDims,
         note: `Additive mask of the ${nSliding} sliding-window layers: also −∞ where the key is ${sw.size} or more positions back` +
           (n <= sw.size ? `, which no pair is at T = ${formatInt(n)}: here it equals the causal mask.` : '.'),
       });
@@ -524,7 +524,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   /** The RoPE popup's rotate stage; a sliding layer's carries its own base and window. */
   let rotateViz: OpViz = { panel: 'rope', stage: 'rotate' };
   const ropeOp = (input: string, output: string, heads: number, what = `in each of the ${heads} heads, rotates ${pairing}`) =>
-    op('RoPE', [input, cos, sin], output,
+    op('RoPE', cfg.ropePerLayer ? [input, cos, sin, pos] : [input, cos, sin], output,
       `Rotary position embedding: ${what} by angle pos·θ_i. ` +
       'No parameters; after it, Q·Kᵀ depends on the distance between positions.', { viz: rotateViz });
 
