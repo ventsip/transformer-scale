@@ -398,3 +398,9 @@ button.play {
   fill: var(--text);
   font-size: 10px;
 }
+
+/* Values too long to share a line with their label go below it. */
+.stat.wide {
+  flex-direction: column;
+  gap: 2px;
+}

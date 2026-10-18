@@ -68,6 +68,8 @@ controls.enableDamping = true;
 controls.zoomToCursor = true;
 controls.zoomSpeed = 4;
 controls.maxDistance = 5e6;
+// For poking at the scene from the console during development.
+if (import.meta.env.DEV) Object.assign(window, { camera, controls });
 
 const tensors = new TensorScene();
 scene.add(tensors.group);
@@ -338,7 +340,7 @@ function renderStats() {
   statsEl.replaceChildren(
     ...rows.map(([k, v]) => {
       const div = document.createElement('div');
-      div.className = 'stat';
+      div.className = v.length > 28 ? 'stat wide' : 'stat';
       div.innerHTML = `<span>${k}</span><b>${v}</b>`;
       return div;
     }),
