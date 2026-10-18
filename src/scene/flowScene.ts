@@ -11,6 +11,12 @@ const OP_HOVER = 2500;
 const CLIMB_MARGIN = 3000;
 /** How far apart, left and right of their op, several climbing inputs of one op rise. */
 const CLIMB_SPREAD = 1200;
+/** Arcs within a floor rise ARC_LIFT of their length, at most ARC_MAX_LIFT, plus ARC_CLEARANCE over their higher end. */
+const ARC_LIFT = 0.25;
+const ARC_MAX_LIFT = 12000;
+const ARC_CLEARANCE = 200;
+/** How far pipes between floors run straight up out of their source (at least) before they bend. */
+const RISE = 2000;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
@@ -184,18 +190,18 @@ export class FlowScene {
       // Straight up or down when there is nowhere to arc to.
       if (Math.hypot(a.x - b.x, a.z - b.z) < 1) return draw(new THREE.LineCurve3(a, b), color, bytes, ends);
       const mid = a.clone().add(b).multiplyScalar(0.5);
-      mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * 0.25, 12000) + 200;
+      mid.y = Math.max(a.y, b.y) + Math.min(a.distanceTo(b) * ARC_LIFT, ARC_MAX_LIFT) + ARC_CLEARANCE;
       draw(new THREE.QuadraticBezierCurve3(a, mid, b), color, bytes, ends);
     };
 
     /** Between floors: leaves `a` heading straight up and enters `b` from below, heading up. */
     const riser = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number, ends: Ends) => {
-      const lift = Math.max((b.y - a.y) / 2, 2000);
+      const lift = Math.max((b.y - a.y) / 2, RISE);
       draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), color, bytes, ends);
     };
 
     // Front edge of the focused floor: climbs from lower floors go up in front of it.
-    const front = Math.max(...placed.filter((p) => p.spec.floor === focusFloor).flatMap((p) => p.boxes.map((box) => box.cz + box.sz / 2)));
+    const front = boxBounds(placed.filter((p) => p.spec.floor === focusFloor).flatMap((p) => p.boxes)).maxZ;
 
     /**
      * From a lower floor into an op above its output (RoPE from the cos / sin tables): leaves `a` heading up, climbs in
@@ -207,7 +213,7 @@ export class FlowScene {
       const z = front + CLIMB_MARGIN;
       const x = b.x + side * CLIMB_SPREAD;
       const path = new THREE.CatmullRomCurve3([
-        a, a.clone().setY(a.y + 2000),
+        a, a.clone().setY(a.y + RISE),
         new THREE.Vector3(x, b.y - OP_HOVER - CLIMB_MARGIN, z), new THREE.Vector3(x, b.y, z),
         new THREE.Vector3(b.x + side * CLIMB_SPREAD * 0.3, b.y, (z + b.z) / 2), b,
       ], false, 'centripetal');

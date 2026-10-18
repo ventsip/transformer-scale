@@ -8,11 +8,11 @@ import { floorLayer, type Mode, type OpSpec, type OpViz, type VizStage } from '.
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
 let model: ModelConfig = LLAMA_3_8B;
 /** The pass being drawn: popups quote its real sizes next to their illustrations. */
-let pass: { mode: Mode; T: number; weightDtype: DType } = { mode: 'prefill', T: 2048, weightDtype: 'bf16' };
+let pass: { mode: Mode; T: number; weightDtype: DType; actDtype: DType } = { mode: 'prefill', T: 2048, weightDtype: 'bf16', actDtype: 'bf16' };
 
-export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number; weightDtype: DType }): void {
+export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: number; weightDtype: DType; actDtype: DType }): void {
   model = cfg;
-  pass = { mode: current.mode, T: current.T, weightDtype: current.weightDtype };
+  pass = { mode: current.mode, T: current.T, weightDtype: current.weightDtype, actDtype: current.actDtype };
 }
 
 type Stage = VizStage<'sampling'>;
@@ -274,6 +274,8 @@ const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 const silu = (x: number) => x * sigmoid(x);
 /** SiLU's minimum: x = −1.2785 solves 1 + x(1 − σ(x)) = 0. */
 const SILU_MIN_X = -1.2785;
+/** Illustrative pre-activations: the gate spread wider than u, so SiLU's bend shows. */
+const GATE_SCALE = 1.6;
 /** Features of d_ffn shown for one illustrative token: the first GLU_HEAD and the last GLU_TAIL. */
 const GLU_HEAD = 24;
 const GLU_TAIL = 8;
@@ -307,7 +309,7 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
     const rand = rng(seed);
     const normal = gaussian(rand);
     // Whole d_ffn vectors; the charts show both ends of them.
-    const gFull = Array.from({ length: model.dFfn }, () => 1.6 * normal());
+    const gFull = Array.from({ length: model.dFfn }, () => GATE_SCALE * normal());
     const uFull = Array.from({ length: model.dFfn }, () => normal());
     const ends = bothEnds(model.dFfn, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
     const g = ends.values((k) => gFull[k]);
@@ -691,6 +693,10 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
 // Embedding lookup: each token id selects one row of the table
 
 const LOOKUP_WORDS = ['The', 'cat', 'sat', 'on', 'the', 'mat', 'because', 'the', 'mat', 'was', 'warm'];
+/** Illustrative token ids: from 1000 (clear of special tokens), below 100,000 or the vocabulary, minus a margin. */
+const LOOKUP_IDS = { from: 1000, to: 100000, margin: 1000 };
+/** Standard deviation of the illustrative embedding row: entries are a few hundredths. */
+const EMBEDDING_STD = 0.02;
 /** Features of the selected row shown as bars: the first ROW_HEAD and the last ROW_TAIL. */
 const ROW_HEAD = 36;
 const ROW_TAIL = 12;
@@ -703,7 +709,7 @@ const ROW_TAIL = 12;
 function lookupTokens(): { text: string; id: number }[] {
   const bos = model.bos;
   const hash = (w: string) => [...w].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
-  return [bos, ...LOOKUP_WORDS.map((w) => ({ text: w, id: 1000 + (hash(w) % (Math.min(model.vocabSize, 100000) - 2000)) }))];
+  return [bos, ...LOOKUP_WORDS.map((w) => ({ text: w, id: LOOKUP_IDS.from + (hash(w) % (Math.min(model.vocabSize, LOOKUP_IDS.to) - LOOKUP_IDS.from - LOOKUP_IDS.margin)) }))];
 }
 
 function lookupViz(body: HTMLElement): void {
@@ -811,7 +817,7 @@ function lookupViz(body: HTMLElement): void {
     const rand = rng(id);
     const normal = gaussian(rand);
     // The whole row (embedding entries are small numbers, a few hundredths); the chart shows both ends of it.
-    const row = Array.from({ length: model.dModel }, () => 0.02 * normal());
+    const row = Array.from({ length: model.dModel }, () => EMBEDDING_STD * normal());
     const ends = bothEnds(model.dModel, ROW_HEAD, ROW_TAIL, [0, 16, 32]);
     const values = ends.values((f) => row[f]);
     const span = Math.max(...values.map(Math.abs));
@@ -983,7 +989,7 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
   body.append(fCost);
   const T = pass.T;
   const decode = pass.mode === 'decode';
-  const scoreBytes = model.nHeads * (decode ? T + 1 : T * T) * 2;
+  const scoreBytes = model.nHeads * (decode ? T + 1 : T * T) * DTYPES[pass.actDtype].bytes;
   fCost.innerHTML = decode
     ? `In this decode step the grid is a single row: the new token (position ${formatInt(T)}) against all ` +
       `<b>${formatInt(T + 1)}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`

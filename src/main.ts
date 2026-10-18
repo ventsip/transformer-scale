@@ -7,7 +7,7 @@ import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
 import {
-  buildModel, byteCount, elementCount, floorCount, floorName, isLayerFloor, isTransient, kvGroup, selectionFor,
+  buildModel, byteCount, elementCount, floorCount, floorLayer, floorName, isLayerFloor, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter, type Edge } from './scene/flowScene';
@@ -316,7 +316,7 @@ function describeSelection(sel: HeadSelection): string {
 function expertRows(): [string, string][] {
   const { nExperts, topK } = cfg.moe!;
   const rows: [string, string][] = [[`Active per token (${topK} of ${nExperts} experts)`, formatCount(stats.activeParams)]];
-  const counts = expertTokens?.[settings.focusFloor - 1];
+  const counts = expertTokens?.[floorLayer(settings.focusFloor)];
   if (!counts) return rows;
   const layer = floorName(cfg, settings.focusFloor);
   if (settings.mode === 'decode') {
@@ -454,7 +454,7 @@ function showPartTooltip(part: Part, e: PointerEvent) {
   const sum = (f: (p: Part) => number) => layer.reduce((a, p) => a + f(p), 0);
   const pct = (x: number, of: number) => (of > 0 ? formatPercent(x / of) : '–');
   const pass = settings.mode === 'decode' ? 'this decode step' : 'the prompt';
-  const routed = part.expert !== undefined ? expertTokens?.[settings.focusFloor - 1]?.[part.expert] : undefined;
+  const routed = part.expert !== undefined ? expertTokens?.[floorLayer(settings.focusFloor)]?.[part.expert] : undefined;
   const rows: string[] = [
     `<div><b>${formatCount(part.params)}</b> parameters · <b>${formatBytes(part.weightBytes)}</b></div>`,
     `<div class="tt-head">${pct(part.params, sum((p) => p.params))} of this layer's parameters · ${pct(part.params, stats.params)} of the model's</div>`,
