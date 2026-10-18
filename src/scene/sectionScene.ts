@@ -12,12 +12,13 @@ const TINTS: Record<PartKind, number> = {
   attention: PALETTE.trayAttention,
   mlp: PALETTE.trayMlp,
   router: PALETTE.trayRouter,
+  shared: PALETTE.trayShared,
   experts: PALETTE.trayMlp,
   expert: PALETTE.trayExpert,
 };
 /** How far trays reach past their blocks, and how far below the floor they sit (experts' trays nest above theirs). */
-const MARGIN: Record<PartKind, number> = { attention: 1536, mlp: 1536, router: 1536, experts: 1536, expert: 512 };
-const DEPTH: Record<PartKind, number> = { attention: 48, mlp: 48, router: 48, experts: 48, expert: 24 };
+const MARGIN: Record<PartKind, number> = { attention: 1536, mlp: 1536, router: 1536, shared: 512, experts: 1536, expert: 512 };
+const DEPTH: Record<PartKind, number> = { attention: 48, mlp: 48, router: 48, shared: 24, experts: 48, expert: 24 };
 const THICKNESS = 16;
 const FILL_OPACITY = 0.14;
 /** Trays of experts no token picks, like their weights, are drawn fainter. */
@@ -65,7 +66,7 @@ export class SectionScene {
       this.trays.push({ part, mesh, outline, fill, edge, opacity });
 
       const div = document.createElement('div');
-      div.className = `section-label${part.kind === 'expert' ? ' expert' : ''}${part.idle ? ' idle' : ''}`;
+      div.className = `section-label${part.kind === 'expert' || part.kind === 'shared' ? ' expert' : ''}${part.idle ? ' idle' : ''}`;
       div.textContent = part.name;
       const label = new CSS2DObject(div);
       // Anchored by its bottom-left corner on the tray's front-left corner.
@@ -76,11 +77,11 @@ export class SectionScene {
     }
   }
 
-  /** The tray under the ray (an expert's before the experts' around it), or null. */
+  /** The tray under the ray (an expert's or the shared experts' before the one around it), or null. */
   pick(raycaster: THREE.Raycaster): Part | null {
     const hits = raycaster.intersectObjects(this.trays.map((t) => t.mesh), false);
     const trays = hits.map((h) => this.trays.find((t) => t.mesh === h.object)!);
-    return (trays.find((t) => t.part.kind === 'expert') ?? trays[0])?.part ?? null;
+    return (trays.find((t) => t.part.kind === 'expert' || t.part.kind === 'shared') ?? trays[0])?.part ?? null;
   }
 
   /** Brightens the tray of `part`, or none. */

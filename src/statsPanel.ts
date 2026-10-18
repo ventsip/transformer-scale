@@ -72,12 +72,20 @@ function expertRows({ cfg, settings, stats, expertTokens }: StatsContext): [stri
   const layer = floorName(cfg, settings.focusFloor);
   if (settings.mode === 'decode') {
     const used = counts.flatMap((n, e) => (n > 0 ? [e] : []));
-    rows.push([`Experts used, ${layer}`, used.join(' and ')]);
-  } else {
+    rows.push([`Experts used, ${layer}`, used.map((e) => `E${e}`).join(' · ')]);
+  } else if (counts.length <= MAX_LISTED_EXPERTS) {
     rows.push([`Tokens per expert, ${layer}`, counts.map(formatInt).join(' · ')]);
+  } else {
+    const idle = counts.filter((n) => n === 0).length;
+    rows.push([`Tokens per expert, ${layer}`,
+      `${formatInt(Math.min(...counts))}–${formatInt(Math.max(...counts))}, mean ${formatInt(Math.round(counts.reduce((a, b) => a + b, 0) / counts.length))}` +
+      (idle ? ` · ${idle} idle` : '')]);
   }
   return rows;
 }
+
+/** Above this many experts, the stats summarize the tokens per expert instead of listing them. */
+const MAX_LISTED_EXPERTS = 16;
 
 /** Example payloads for the legend's pipe widths. */
 const WIDTH_EXAMPLES = [['8 KiB', 2 ** 13], ['16 MiB', 2 ** 24], ['1 GiB', 2 ** 30]] as const;

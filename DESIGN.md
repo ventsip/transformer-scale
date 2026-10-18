@@ -185,6 +185,28 @@
   column or any tensor of an expert selects that expert across all layers and dims the others; Esc clears it.
   `selected_experts` and `routing_weights` are per top-k slot, not per expert, so they stay whole.
 
+## DeepSeek-V2-Lite: latent attention, many experts
+
+- **Multi-head latent attention (MLA).** Q as usual (`q_proj`, 2048 → 16 × 192), but RoPE turns only the last 64 dims
+  of each head ("decoupled RoPE"), in neighboring pairs. K and V come from a small latent: `kv_a_proj_with_mqa`
+  (2048 → 512 + 64) yields the latent c_kv, normalized by its own RMSNorm, and one 64-dim RoPE key shared by all heads;
+  `kv_b_proj` (512 → 16 × (128 + 128)) expands c_kv into each head's position-free K and its V. `cat` joins K with the
+  shared key (192 per head); V is a view (128 per head), so the attention output and `o_proj` are 16 × 128 wide.
+- **MLA cache setting.** MLA exists to cache only c_kv and the RoPE key: 576 values per token per layer. HF does not:
+  it expands first and caches K and V, 5,120 values (270 KiB per token across 27 layers, against 30.4 KiB). "K, V
+  expanded (HF)" is the default, true to the rest of the app; "Latent + RoPE key (vLLM, SGLang)" caches the latent and
+  expands the whole cached latent every pass, as those engines do in prefill (in decode they fold `kv_b_proj` into
+  the query and output projections instead, which the notes say rather than draw).
+- **YaRN.** RoPE trained at 4K is stretched 40× to 160K: the slowest of the 32 frequencies are divided by 40, with a
+  ramp from the fast ones that stay (`src/model/rope.ts`, used by the inv_freq note and the RoPE popup), and scores are
+  scaled up by mscale² ≈ 1.59.
+- **Experts.** Layer 0 keeps a dense MLP (10,944 wide). The others have 64 routed SwiGLU experts, 1,408 wide, top 6,
+  in a 12-wide grid, plus 2 shared experts that every token runs through, which HF runs as one 2,816-wide MLP: drawn
+  in the router's section with a tray of their own, added to the routed sum. The top-6 weights are not renormalized
+  (norm_topk_prob false), so the routed experts together count for less than the shared ones. Module names, widths and
+  renormalization come from the config, so Mixtral and DeepSeek share one builder.
+- Parameters 15.7B; active per token 2.66B (DeepSeek quotes 2.4B, leaving out the embedding).
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are
@@ -203,7 +225,7 @@
 
 ## Scope
 
-- Models: GPT-2, GPT-2 XL, Llama-3-8B, Llama-3-70B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
+- Models: GPT-2, GPT-2 XL, Llama-3-8B, Llama-3-70B, Mixtral-8x7B and DeepSeek-V2-Lite (`src/model/config.ts`); everything is derived from the config.
   Llama-3-70B is 8B scaled up (twice the width, 80 layers) with the same 8 KV heads: weights grow 8.8×, the KV cache
   per token 2.5× (128 → 320 KiB).
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then

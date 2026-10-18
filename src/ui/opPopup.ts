@@ -1,5 +1,6 @@
 import { formatBytes, formatFlops, formatInt, formatPercent } from '../format';
-import { LLAMA_3_8B, type ModelConfig } from '../model/config';
+import { LLAMA_3_8B, ropeDim, type ModelConfig } from '../model/config';
+import { ropeFrequencies } from '../model/rope';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
 import { PALETTE, cssColor } from '../palette';
@@ -31,7 +32,7 @@ const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLEleme
   attention: { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body, viz) => attentionViz(body, viz.stage) },
   rope: { title: 'RoPE: rotary position embedding', render: (body, viz) => ropeViz(body, viz.stage) },
   rmsnorm: { title: 'RMSNorm: x / RMS(x) · weight', render: (body, viz) => rmsNormViz(body, viz.stage) },
-  swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage) },
+  swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage, viz.width) },
   gelu: { title: 'GELU: a = h · Φ(h), tanh approximation', render: (body) => geluViz(body) },
   layernorm: { title: 'LayerNorm: (x − mean) / std · weight + bias', render: (body) => layerNormViz(body) },
 };
@@ -283,7 +284,7 @@ const GATE_SCALE = 1.6;
 const GLU_HEAD = 24;
 const GLU_TAIL = 8;
 
-function swigluViz(body: HTMLElement, focus: GluStage): void {
+function swigluViz(body: HTMLElement, focus: GluStage, width: number): void {
   const sSilu = stageSection(body, focus === 'silu', 'SiLU(x) = x · σ(x)',
     'The activation of the gate. Like ReLU for large |x|, but smooth, and slightly negative for negative inputs. ' +
     'No parameters: elementwise, the same for every feature and token.');
@@ -297,7 +298,7 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
   const sGate = stageSection(body, focus === 'gate', 'a = SiLU(g) ⊙ u',
     `Two projections of the same input: the gate g = x · W_gate and the up projection u = x · W_up. ` +
     `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for one token, from both ends of its ` +
-    `${formatInt(model.dFfn)} d_ffn features, all on one scale.`);
+    `${formatInt(width)} d_ffn features, all on one scale.`);
   const resample = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
   row.append(resample);
@@ -312,9 +313,9 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
     const rand = rng(seed);
     const normal = gaussian(rand);
     // Whole d_ffn vectors; the charts show both ends of them.
-    const gFull = Array.from({ length: model.dFfn }, () => GATE_SCALE * normal());
-    const uFull = Array.from({ length: model.dFfn }, () => normal());
-    const ends = bothEnds(model.dFfn, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
+    const gFull = Array.from({ length: width }, () => GATE_SCALE * normal());
+    const uFull = Array.from({ length: width }, () => normal());
+    const ends = bothEnds(width, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
     const g = ends.values((k) => gFull[k]);
     const u = ends.values((k) => uFull[k]);
     const sg = g.map(silu);
@@ -331,7 +332,7 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
     cOut.draw({ values: a, ghost: u, ...axis, describe: describe((i) => `${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`) });
     const closed = gFull.filter((v) => v < 0).length;
     facts.innerHTML =
-      `<b>${formatInt(closed)}</b> of ${formatInt(model.dFfn)} gates are negative: ` +
+      `<b>${formatInt(closed)}</b> of ${formatInt(width)} gates are negative: ` +
       `SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
       `so those features of u barely pass (and flip sign slightly). Positive gates pass u scaled by about g. ` +
       'Cheap in FLOPs, but g, u and a are each a full T × d_ffn tensor, several times wider than the residual stream.';
@@ -579,8 +580,8 @@ function lineChart(o: LineChartOptions): HTMLElement {
 // ---------------------------------------------------------------------------------------------
 // RoPE: rotate each dimension pair of q and k by position · θ_i
 
-/** Dimension pairs drawn as dials: from the fastest to the slowest. */
-const DIAL_PAIRS = [0, 4, 8, 16, 24, 32, 48, 63];
+/** Dimension pairs drawn as dials, as fractions of the pairs: from the fastest to the slowest. */
+const DIAL_PAIRS = [0, 1 / 16, 1 / 8, 1 / 4, 3 / 8, 1 / 2, 3 / 4, 1];
 
 /** Tokens, compactly: 6.3, 1,234, 12K, 3.1M. */
 function tokens(n: number): string {
@@ -590,24 +591,29 @@ function tokens(n: number): string {
 }
 
 function ropeViz(body: HTMLElement, focus: RopeStage): void {
-  const pairs = model.headDim / 2;
+  const dims = ropeDim(model);
+  const pairs = dims / 2;
   const base = model.ropeTheta!;
-  const theta = Array.from({ length: pairs }, (_, i) => base ** ((-2 * i) / model.headDim));
+  const theta = ropeFrequencies(model);
+  const dimsName = model.mla ? `${dims} RoPE dims (of ${model.headDim})` : `${dims} dimensions`;
+  const yarn = model.yarn;
+  const stretched = yarn ? theta.filter((t, i) => t < base ** ((-2 * i) / dims) * 0.999).length : 0;
   const wavelength = theta.map((t) => (2 * Math.PI) / t);
   const ctx = model.maxContext;
 
   // 1. Frequencies.
   const sFreq = stageSection(body, focus === 'freq', 'θ_i: one frequency per dimension pair',
-    `Each head's ${model.headDim} dimensions form ${pairs} pairs; pair i rotates by θ_i = ` +
-    `${formatInt(base)}^(−2i/${model.headDim}) radians per token. ` +
-    `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice to fill head_dim.`);
+    `Each head's ${dimsName} form ${pairs} pairs; pair i rotates by θ_i = ` +
+    `${formatInt(base)}^(−2i/${dims}) radians per token` +
+    (yarn ? `, except that YaRN slows the ${stretched} slowest pairs by up to ${yarn.factor}× to stretch the ${formatInt(yarn.originalContext)}-token training context. ` : '. ') +
+    `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice.`);
   const cFreq = barChart('wavelength 2π/θ_i in tokens (log scale), by pair', 'line: context length');
   const fFreq = el('div', { className: 'op-popup-facts' });
   sFreq.append(cFreq.root, fFreq);
   const logLambda = wavelength.map(Math.log10);
   cFreq.draw({
     values: logLambda, lo: 0, hi: Math.max(...logLambda, Math.log10(ctx)) * 1.05,
-    ticks: [0, 16, 32, 48, pairs - 1], tickLabel: String, yTick: (v) => tokens(10 ** v),
+    ticks: [0, pairs / 4, pairs / 2, (3 * pairs) / 4, pairs - 1], tickLabel: String, yTick: (v) => tokens(10 ** v),
     refs: [{ value: Math.log10(ctx), label: `context ${formatInt(ctx)}`, start: true }],
     describe: (i) => `pair ${i} · θ = ${theta[i].toPrecision(3)} rad/token · one turn every ${tokens(wavelength[i])} tokens`,
   });
@@ -619,7 +625,9 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
 
   // 2. Rotation by position.
   const sRot = stageSection(body, focus === 'rotate', 'RoPE: rotate each pair by pos · θ_i',
-    `q and k are split into pairs (HF rotate_half pairs dimension i with i + ${model.headDim / 2}, not neighbors), and each pair is ` +
+    (model.ropeInterleaved
+      ? `q and k${model.mla ? `'s RoPE dims` : ''} are split into pairs of neighboring dimensions (2i, 2i+1), and each pair is `
+      : `q and k are split into pairs (HF rotate_half pairs dimension i with i + ${pairs}, not neighbors), and each pair is `) +
     'rotated like a 2D vector. No parameters, nothing added: the vector keeps its length, only its angles change.');
   const maxLog = Math.round(Math.log2(ctx) * 100);
   const pos = el('input', { type: 'range', min: '0', max: String(maxLog), step: '1', value: '700' });
@@ -634,7 +642,7 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
     const p = Math.round(2 ** (Number(pos.value) / 100)) - 1;
     posShown.textContent = formatInt(p);
     dials.replaceChildren();
-    DIAL_PAIRS.filter((i) => i < pairs).forEach((i, k) => {
+    DIAL_PAIRS.map((f) => Math.min(pairs - 1, Math.round(f * pairs))).forEach((i, k) => {
       const cx = 70 + (k % 4) * 140;
       const cy = 60 + Math.floor(k / 4) * 125;
       const r = 36;
@@ -667,7 +675,7 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   sRel.append(lineChart({
     caption: '<span class="op-legend"><i class="swatch-line"></i>q · k for the same vector at distance m − n (1 = no rotation)</span>',
     label: 'Score of identical q and k against their distance',
-    x: { lo: 1, hi: ctx, log: true, ticks: [1, 10, 100, 1000, 10000].filter((x) => x <= ctx), tickLabel: tokens },
+    x: { lo: 1, hi: ctx, log: true, ticks: [1, 10, 100, 1e3, 1e4, 1e5, 1e6].filter((x) => x <= ctx), tickLabel: tokens },
     y: { lo: -0.2, hi: 1, ticks: [0, 0.5, 1] },
     f: score,
     snap: Math.round,
@@ -692,21 +700,27 @@ const MOE_HEAD = 18;
 const MOE_TAIL = 6;
 
 function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
-  const { nExperts: E, topK: K } = model.moe!;
+  const { nExperts: E, topK: K, renormalize, expertFfn, sharedFfn } = model.moe!;
   const expertIds = Array.from({ length: E }, (_, e) => e);
   const expertTick = (e: number) => `E${e}`;
+  // Many experts: tick every eighth.
+  const expertTicks = E <= MAX_EXPERT_TICKS ? expertIds : [...expertIds.filter((e) => e % 8 === 0), E - 1];
   const pct = (p: number) => `${(100 * p).toFixed(1)}%`;
+  /** "a and b", or "a, b, c and d". */
+  const list = (items: string[]) => (items.length < 2 ? items.join('') : `${items.slice(0, -1).join('</b>, <b>')}</b> and <b>${items[items.length - 1]}`);
 
   // 1. Router.
-  const sRouter = stageSection(body, focus === 'router', `Router: softmax, top-${K}, renormalize`,
+  const sRouter = stageSection(body, focus === 'router', `Router: softmax, top-${K}${renormalize ? ', renormalize' : ''}`,
     `A ${formatInt(model.dModel)} × ${E} weight scores the ${E} experts for each token; softmax (in fp32) turns the ` +
-    `scores into probabilities, the top ${K} are kept, and their probabilities are rescaled to sum to 1. Illustrative scores for one token.`);
+    `scores into probabilities and the top ${K} are kept` +
+    (renormalize ? ', their probabilities rescaled to sum to 1.' : ' as they are: not rescaled (norm_topk_prob false), so they sum to less than 1.') +
+    ' Illustrative scores for one token.');
   const another = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
   row.append(another);
   const cLogits = barChart('router logits');
   const cProbs = barChart('softmax', `outlines: experts outside the top ${K}`);
-  const cWeights = barChart('routing weights', `the top ${K}, rescaled to sum to 1`);
+  const cWeights = barChart('routing weights', renormalize ? `the top ${K}, rescaled to sum to 1` : `the top ${K}, as they are`);
   const fRouter = el('div', { className: 'op-popup-facts' });
   sRouter.append(row, cLogits.root, cProbs.root, cWeights.root, fRouter);
 
@@ -723,23 +737,24 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   sDispatch.append(cCounts.root, fDispatch);
   const even = (K * n) / E;
   cCounts.draw({
-    values: counts, lo: 0, hi: Math.max(...counts, even) * 1.1, ticks: expertIds, tickLabel: expertTick,
+    values: counts, lo: 0, hi: Math.max(...counts, even) * 1.1, ticks: expertTicks, tickLabel: expertTick,
     refs: decode ? [] : [{ value: even, label: 'even' }], removed: counts.map((c) => c === 0),
     describe: (e) => (counts[e] ? `E${e} · ${formatInt(counts[e])} tokens` : `E${e} · idle: its weights are not read`),
   });
   const used = expertIds.filter((e) => counts[e] > 0);
   fDispatch.innerHTML = decode
-    ? `The new token goes to experts <b>${used.join('</b> and <b>')}</b>; the other ${E - used.length} stay idle, so this ` +
-      `layer reads only <b>${used.length}</b> of ${E} experts' weights. Generate to watch the pair change token by token.`
+    ? `The new token goes to experts <b>${list(used.map(String))}</b>; the other ${E - used.length} stay idle, so this ` +
+      `layer reads only <b>${used.length}</b> of ${E} experts' weights. Generate to watch the choice change token by token.`
     : `${K} × ${formatInt(n)} = <b>${formatInt(K * n)}</b> token slots; the busiest expert gets ` +
       `<b>${formatInt(Math.max(...counts))}</b> (${(Math.max(...counts) / even).toFixed(2)}× its even share) and the quietest ` +
       `<b>${formatInt(Math.min(...counts))}</b>. HF's loop drops no tokens; training adds a load-balancing loss to keep this even.`;
 
   // 3. Combine.
-  const sCombine = stageSection(body, focus === 'combine', 'Combine: m = Σ weight × expert output',
+  const sCombine = stageSection(body, focus === 'combine', `Combine: m = Σ weight × expert output${sharedFfn ? ' + shared experts' : ''}`,
     `Each expert's output rows are scaled by their routing weights and added back at their tokens' positions (index_add_). ` +
-    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above, from both ends of their ${formatInt(model.dModel)} features.`);
-  const cParts = Array.from({ length: K }, () => barChart('', ''));
+    `Every row of m receives exactly ${K} contributions` + (sharedFfn ? ', plus the shared experts\' output, unweighted' : '') +
+    `. Illustrative outputs for the token above, from both ends of their ${formatInt(model.dModel)} features.`);
+  const cParts = Array.from({ length: K + (sharedFfn ? 1 : 0) }, () => barChart('', ''));
   const cSum = barChart('m: the sum', 'outlines: the first expert alone');
   sCombine.append(...cParts.map((c) => c.root), cSum.root);
 
@@ -754,47 +769,51 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
     const probs = exp.map((v) => v / sum);
     const top = [...expertIds].sort((a, b) => probs[b] - probs[a]).slice(0, K);
     const kept = top.reduce((a, e) => a + probs[e], 0);
-    const weights = expertIds.map((e) => (top.includes(e) ? probs[e] / kept : 0));
+    const weights = expertIds.map((e) => (top.includes(e) ? (renormalize ? probs[e] / kept : probs[e]) : 0));
 
     const lHi = Math.max(0, ...logits);
     const lLo = Math.min(0, ...logits);
-    cLogits.draw({ values: logits, lo: lLo, hi: lHi, ticks: expertIds, tickLabel: expertTick, describe: (e) => `E${e} · logit ${logits[e].toFixed(2)}` });
+    cLogits.draw({ values: logits, lo: lLo, hi: lHi, ticks: expertTicks, tickLabel: expertTick, describe: (e) => `E${e} · logit ${logits[e].toFixed(2)}` });
     cProbs.draw({
-      values: probs, lo: 0, hi: 1, percent: true, ticks: expertIds, tickLabel: expertTick,
+      values: probs, lo: 0, hi: Math.max(...probs) * 1.1, percent: true, ticks: expertTicks, tickLabel: expertTick,
       removed: expertIds.map((e) => !top.includes(e)),
       describe: (e) => `E${e} · p = ${pct(probs[e])}${top.includes(e) ? ' · kept' : ''}`,
     });
     cWeights.draw({
-      values: weights, lo: 0, hi: 1, percent: true, ticks: expertIds, tickLabel: expertTick, ghost: probs,
-      describe: (e) => (weights[e] ? `E${e} · ${pct(probs[e])} ÷ ${pct(kept)} = ${pct(weights[e])}` : `E${e} · not used`),
+      values: weights, lo: 0, hi: renormalize ? 1 : Math.max(...probs) * 1.1, percent: true, ticks: expertTicks, tickLabel: expertTick, ghost: probs,
+      describe: (e) => (!weights[e] ? `E${e} · not used` : renormalize ? `E${e} · ${pct(probs[e])} ÷ ${pct(kept)} = ${pct(weights[e])}` : `E${e} · ${pct(weights[e])}`),
     });
     fRouter.innerHTML =
-      `This token goes to <b>E${top.join('</b> and <b>E')}</b>. Together they had <b>${pct(kept)}</b> of the probability; ` +
-      `after rescaling their weights are <b>${top.map((e) => pct(weights[e])).join('</b> and <b>')}</b>. ` +
+      `This token goes to <b>${list(top.map((e) => `E${e}`))}</b>. Together they had <b>${pct(kept)}</b> of the probability` +
+      (renormalize ? `; after rescaling their weights are <b>${list(top.map((e) => pct(weights[e])))}</b>. ` : `, and keep exactly those weights: the routed experts count for ${pct(kept)} of m, the shared experts in full. `) +
       `The router is ${formatInt(model.dModel * E)} parameters per layer, against ` +
-      `${(3 * model.dModel * model.dFfn / 1e6).toFixed(0)}M in each expert.`;
+      `${(3 * model.dModel * expertFfn / 1e6).toFixed(1)}M in each expert.`;
 
     // Illustrative expert outputs (different experts, different vectors), whole d_model rows shown by both ends.
     const ends = bothEnds(model.dModel, MOE_HEAD, MOE_TAIL, [0, 8]);
-    const outputs = top.map(() => {
+    // The shared experts, if any, contribute unweighted after the routed ones.
+    const contributors = [...top, ...(sharedFfn ? [SHARED] : [])];
+    const weightOf = (e: number) => (e === SHARED ? 1 : weights[e]);
+    const nameOf = (e: number) => (e === SHARED ? 'the shared experts' : `E${e}`);
+    const outputs = contributors.map(() => {
       const full = Array.from({ length: model.dModel }, () => normal());
       return ends.values((f) => full[f]);
     });
-    const parts = outputs.map((y, k) => y.map((v) => v * weights[top[k]]));
+    const parts = outputs.map((y, k) => y.map((v) => v * weightOf(contributors[k])));
     const total = parts[0].map((_, i) => parts.reduce((a, p) => a + p[i], 0));
     const all = [...outputs.flat(), ...parts.flat(), ...total];
     const axis = { lo: Math.min(...all), hi: Math.max(...all), gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
     const describe = (text: (i: number) => string) => (i: number) =>
       (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(i)}`);
     parts.forEach((p, k) => {
-      const e = top[k];
+      const e = contributors[k];
       cParts[k].root.querySelector('figcaption')?.remove();
-      const caption = el('figcaption', { textContent: `${pct(weights[e])} × E${e}'s output` });
-      caption.append(el('span', { textContent: `outlines: E${e}'s output before scaling` }));
+      const caption = el('figcaption', { textContent: e === SHARED ? "the shared experts' output (weight 1)" : `${pct(weights[e])} × E${e}'s output` });
+      if (e !== SHARED) caption.append(el('span', { textContent: `outlines: ${nameOf(e)}'s output before scaling` }));
       cParts[k].root.prepend(caption);
       cParts[k].draw({
-        values: p, ghost: outputs[k], ...axis,
-        describe: describe((i) => `${weights[e].toFixed(3)} × ${outputs[k][i].toFixed(2)} = ${p[i].toFixed(2)}`),
+        values: p, ghost: e === SHARED ? undefined : outputs[k], ...axis,
+        describe: describe((i) => `${weightOf(e).toFixed(3)} × ${outputs[k][i].toFixed(2)} = ${p[i].toFixed(2)}`),
       });
     });
     cSum.draw({
@@ -809,6 +828,11 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   update();
   ({ router: sRouter, dispatch: sDispatch, combine: sCombine })[focus].scrollIntoView({ block: 'center' });
 }
+
+/** Above this many experts, MoE charts tick every eighth expert. */
+const MAX_EXPERT_TICKS = 16;
+/** The shared experts' place among the contributions to m. */
+const SHARED = -1;
 
 // ---------------------------------------------------------------------------------------------
 // Embedding lookup: each token id selects one row of the table

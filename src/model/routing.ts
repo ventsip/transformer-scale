@@ -22,20 +22,36 @@ const STICKINESS = 0.25;
 
 const cache = new Map<ModelConfig, Routing>();
 
+/**
+ * Layers are drawn independently and lazily: each layer's tokens are chosen in order (stickiness looks one token back)
+ * only as far as a pass asks, so long contexts and many experts cost nothing until they are used.
+ */
 export function routing(cfg: ModelConfig): Routing {
   const cached = cache.get(cfg);
   if (cached) return cached;
   const { nExperts: E, topK: K } = cfg.moe!;
-  const P = cfg.maxContext;
-  const rand = rng(42);
-  const normal = gaussian(rand);
-  // choice[(layer * P + pos) * K + j]: the j-th expert of that token.
-  const choice = new Uint8Array(cfg.nLayers * P * K);
   const weights = new Float64Array(E);
-  for (let l = 0; l < cfg.nLayers; l++) {
-    const popularity = Array.from({ length: E }, () => Math.exp(IMBALANCE * normal()));
-    for (let p = 0; p < P; p++) {
-      const at = (l * P + p) * K;
+  const layers = new Map<number, { rand: () => number; popularity: number[]; choice: Uint8Array; filled: number }>();
+
+  /** Layer `l`'s choices for positions [0, to): choice[pos * K + j] is the j-th expert of that token. */
+  function chosen(l: number, to: number): Uint8Array {
+    let layer = layers.get(l);
+    if (!layer) {
+      const rand = rng(42 + l);
+      const normal = gaussian(rand);
+      const popularity = Array.from({ length: E }, () => Math.exp(IMBALANCE * normal()));
+      layer = { rand, popularity, choice: new Uint8Array(0), filled: 0 };
+      layers.set(l, layer);
+    }
+    if (to * K > layer.choice.length) {
+      // Grow geometrically, up to the context length.
+      const grown = new Uint8Array(Math.min(cfg.maxContext, Math.max(to, 2 * layer.choice.length / K)) * K);
+      grown.set(layer.choice);
+      layer.choice = grown;
+    }
+    const { rand, popularity, choice } = layer;
+    for (let p = layer.filled; p < to; p++) {
+      const at = p * K;
       weights.set(popularity);
       for (let j = 0; j < K; j++) {
         let e: number;
@@ -53,12 +69,16 @@ export function routing(cfg: ModelConfig): Routing {
         weights[e] = 0;
       }
     }
+    layer.filled = Math.max(layer.filled, to);
+    return choice;
   }
+
   const r: Routing = {
-    experts: (l, p) => Array.from(choice.subarray((l * P + p) * K, (l * P + p + 1) * K)),
+    experts: (l, p) => Array.from(chosen(l, p + 1).subarray(p * K, (p + 1) * K)),
     counts: (l, from, to) => {
+      const choice = chosen(l, to);
       const n = new Array<number>(E).fill(0);
-      for (let i = (l * P + from) * K; i < (l * P + to) * K; i++) n[choice[i]]++;
+      for (let i = from * K; i < to * K; i++) n[choice[i]]++;
       return n;
     },
   };

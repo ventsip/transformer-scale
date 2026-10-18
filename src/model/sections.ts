@@ -1,7 +1,7 @@
-import type { ModelConfig } from './config';
-import { ATTENTION_SECTION, FIRST_EXPERT_SECTION, MLP_SECTION, byteCount, elementCount, isLayerFloor, isTransient, type Model, type TensorSpec } from './tensors';
+import { isMoeLayer, type ModelConfig } from './config';
+import { ATTENTION_SECTION, FIRST_EXPERT_SECTION, MLP_SECTION, byteCount, elementCount, floorLayer, isLayerFloor, isTransient, type Model, type TensorSpec } from './tensors';
 
-export type PartKind = 'attention' | 'mlp' | 'router' | 'experts' | 'expert';
+export type PartKind = 'attention' | 'mlp' | 'router' | 'shared' | 'experts' | 'expert';
 
 /** A named part of a decoder-layer floor, with the tensors in it and their totals for the current pass. */
 export interface Part {
@@ -26,8 +26,8 @@ export interface Part {
 
 /**
  * The parts of a decoder-layer floor: attention (section 0), then the MLP (section 1) or, in a mixture of experts,
- * the router (section 1, with the norm before it and the sum after the experts), all experts together (sections 2 and
- * up) and each expert on its own. Other floors have no parts.
+ * the router (section 1, with the norm before it and the sum after the experts), the shared experts if any (also in
+ * section 1), all routed experts together (sections 2 and up) and each expert on its own. Other floors have no parts.
  */
 export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[] {
   if (!isLayerFloor(cfg, floor)) return [];
@@ -58,8 +58,9 @@ export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[
   };
 
   const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION))];
-  if (!cfg.moe) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
-  parts.push(part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION)));
+  if (!cfg.moe || !isMoeLayer(cfg, floorLayer(floor))) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
+  parts.push(part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION && !s.shared)));
+  if (cfg.moe.sharedFfn) parts.push(part('shared', 'Shared experts', 'shared', onFloor.filter((s) => s.shared)));
   parts.push(part('experts', 'Experts', 'experts', onFloor.filter((s) => s.section >= FIRST_EXPERT_SECTION)));
   for (let e = 0; e < cfg.moe.nExperts; e++) {
     parts.push(part(`expert ${e}`, `E${e}`, 'expert', onFloor.filter((s) => s.expert === e), e));

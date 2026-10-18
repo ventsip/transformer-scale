@@ -1,6 +1,7 @@
-import type { ModelConfig } from './config';
+import { isMoeLayer, ropeDim, vHeadDim, type ModelConfig } from './config';
 import { DTYPES, type DType } from './dtypes';
 import { formatCount, formatFlops, formatInt } from '../format';
+import { ropeFrequencies, yarnScoreScale } from './rope';
 import { routing } from './routing';
 
 /** Which attention projection a weight (or a part of a fused one) is: queries, keys or values. */
@@ -64,6 +65,8 @@ export interface TensorSpec {
   expertAxis?: 'x' | 'z';
   /** Mixture of experts: the expert this tensor belongs to. */
   expert?: number;
+  /** Mixture of experts: part of the shared experts, which every token runs through. */
+  shared?: boolean;
   /** Weights of an expert no token is routed to in this pass: never read, drawn dimmed. */
   idle?: boolean;
   /** Extra space before this tensor's station, e.g. between experts. */
@@ -132,7 +135,7 @@ export type OpViz =
   | { panel: 'rmsnorm'; stage: 'input' | 'mean' | 'normalize' | 'weight' }
   | { panel: 'layernorm' }
   | { panel: 'gelu' }
-  | { panel: 'swiglu'; stage: 'silu' | 'gate' };
+  | { panel: 'swiglu'; stage: 'silu' | 'gate'; width: number };
 export type VizStage<P extends OpViz['panel']> = Extract<OpViz, { panel: P; stage: unknown }>['stage'];
 
 /** Extra fields of an op, given when it is created. */
@@ -173,7 +176,12 @@ export interface BuildOptions {
   elementwise: ElementwiseDetail;
   /** Slots per layer in a static cache. */
   cacheCapacity: number;
+  /** Multi-head latent attention: what the KV cache holds (default hf). */
+  mlaCache?: MlaCache;
 }
+
+/** hf: K and V, expanded from the latent (as HF caches them). latent: the latent and RoPE key (vLLM, SGLang). */
+export type MlaCache = 'hf' | 'latent';
 
 const TRANSIENT = 'Transient: during inference it only exists while this layer runs.';
 const KV = 'Written to the KV cache: persists for the whole generation.';
@@ -182,9 +190,9 @@ const STACK_GAP = 2048;
 /** The attention popup's stages that eager steps and the fused kernel belong to. */
 const SCORES: OpExtra = { viz: { panel: 'attention', stage: 'scores' } };
 const SOFTMAX: OpExtra = { viz: { panel: 'attention', stage: 'softmax' } };
-/** The SwiGLU popup's stages: SiLU (alone or fused with the product), and the product. */
-const SILU: OpExtra = { viz: { panel: 'swiglu', stage: 'silu' } };
-const GATE: OpExtra = { viz: { panel: 'swiglu', stage: 'gate' } };
+/** The SwiGLU popup's stages, for an MLP `width` wide: SiLU (alone or fused with the product), and the product. */
+const SILU = (width: number): OpExtra => ({ viz: { panel: 'swiglu', stage: 'silu', width } });
+const GATE = (width: number): OpExtra => ({ viz: { panel: 'swiglu', stage: 'gate', width } });
 /** Extra space between experts of a mixture-of-experts layer, so each reads as a block. */
 const EXPERT_GAP = 8192;
 
@@ -226,6 +234,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const qDim: Dim = { name: `q_dim (${cfg.nHeads}×${cfg.headDim})`, size: cfg.nHeads * cfg.headDim };
   const kvDim: Dim = { name: `kv_dim (${cfg.nKvHeads}×${cfg.headDim})`, size: cfg.nKvHeads * cfg.headDim };
   const ffn: Dim = { name: 'd_ffn', size: cfg.dFfn };
+  /** Attention output: V's width per head, times the heads (MLA's V is narrower than its Q and K). */
+  const oDim: Dim = cfg.mla ? { name: `${cfg.nHeads}×v_head_dim ${vHeadDim(cfg)}`, size: cfg.nHeads * vHeadDim(cfg) } : qDim;
   const vocab: Dim = { name: 'vocab', size: cfg.vocabSize };
   const gpt2 = cfg.arch === 'gpt2';
   const gqaNote = cfg.nKvHeads === cfg.nHeads
@@ -285,8 +295,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   // position table, looked up and added to the token embedding.
   const top = gpt2 ? 'transformer.' : 'model.';
   prefix = top;
-  const half: Dim = { name: 'head_dim / 2', size: cfg.headDim / 2 };
-  const headDim: Dim = { name: 'head_dim', size: cfg.headDim };
+  // RoPE rotates all of each head's dims, or MLA's decoupled RoPE part.
+  const ropeName = cfg.mla ? 'qk_rope_head_dim' : 'head_dim';
+  const half: Dim = { name: `${ropeName} / 2`, size: ropeDim(cfg) / 2 };
+  const headDim: Dim = { name: ropeName, size: ropeDim(cfg) };
   // position_ids gets its own station after the RoPE tables, next to input_ids; they already read it.
   const pos = `${floor}:position_ids`;
   let cos = '';
@@ -294,17 +306,21 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   if (!gpt2) {
     const theta = cfg.ropeTheta!;
     const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
+    const freqs = ropeFrequencies(cfg);
+    const yarn = cfg.yarn
+      ? ` YaRN stretches the ${formatTokens(cfg.yarn.originalContext)}-token training context ${cfg.yarn.factor}×: the slowest frequencies are divided by ${cfg.yarn.factor}.`
+      : '';
     const invFreq = push({
       id: 'rotary_emb.inv_freq', label: 'model.rotary_emb.inv_freq', kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
-      note: `RoPE frequencies θ_i = ${formatInt(theta)}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
-        `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * theta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
+      note: `RoPE frequencies θ_i = ${formatInt(theta)}^(−2i/${headDim.size}): a fixed buffer, not a parameter.${yarn} ` +
+        `Wavelengths 2π/θ_i run from ~${formatTokens(2 * Math.PI / freqs[0])} tokens to ~${formatTokens(2 * Math.PI / freqs[freqs.length - 1])} tokens.`,
     });
     next();
     const freq: OpViz = { panel: 'rope', stage: 'freq' };
     for (const fn of ['cos', 'sin'] as const) {
       const table = act(fn, `${fn}(pos · θ): RoPE table`, headDim, { note: ropeNote });
       op(`${fn}(pos·θ)`, [pos, invFreq], table,
-        `Outer product of positions and frequencies, then ${fn === 'cos' ? 'cosine' : 'sine'}; the ${half.size} angles are repeated to fill head_dim.`, { viz: freq });
+        `Outer product of positions and frequencies, then ${fn === 'cos' ? 'cosine' : 'sine'}; the ${half.size} angles are repeated to fill ${ropeName}.`, { viz: freq });
       if (fn === 'cos') cos = table;
       else sin = table;
       next();
@@ -374,36 +390,38 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   };
 
   /** RMSNorm with its weight; expanded, every intermediate HF's LlamaRMSNorm allocates. */
-  const rmsNorm = (input: string, weightName: string, id: string, label: string) => {
-    const w = vector(weightName, dModel);
+  const rmsNorm = (input: string, weightName: string, id: string, label: string, dim: Dim = dModel,
+    out_: { kind?: 'activation' | 'kv'; note?: string } = {}) => {
+    const w = vector(weightName, dim);
     const stage = (s: VizStage<'rmsnorm'>): OpExtra => ({ viz: { panel: 'rmsnorm', stage: s } });
     if (o.elementwise === 'compact') {
-      const out = act(id, label, dModel);
+      const out = act(id, label, dim, out_);
       op('RMSNorm', [input, w], out, 'Normalize each token vector by its RMS, then scale by the norm weight.', stage('input'));
       return out;
     }
     const tmp = (suffix: string, tmpLabel: string, dim: Dim, dtype: DType, note: string, extra: Partial<TensorSpec> = {}) =>
       stacked(`${id}.${suffix}`, tmpLabel, dim, dtype, `${TRANSIENT} ${note}`, extra);
-    const x32 = tmp('fp32', 'x in fp32', dModel, 'fp32', 'Upcast for accuracy: twice the bytes of x.');
+    const x32 = tmp('fp32', 'x in fp32', dim, 'fp32', 'Upcast for accuracy: twice the bytes of x.');
     op('to fp32', [input], x32, 'RMSNorm computes in fp32.', stage('input'));
-    const sq = tmp('sq', 'x²', dModel, 'fp32', 'Squares, elementwise.');
+    const sq = tmp('sq', 'x²', dim, 'fp32', 'Squares, elementwise.');
     op('x²', [x32], sq, 'Elementwise square.', stage('mean'));
     const ms = tmp('mean', 'mean(x²)', one, 'fp32', 'One value per token.');
-    op('mean', [sq], ms, `Mean over the ${cfg.dModel} features of each token.`, stage('mean'));
+    op('mean', [sq], ms, `Mean over the ${dim.size} features of each token.`, stage('mean'));
     const r = tmp('rsqrt', '1/√(mean(x²) + ε)', one, 'fp32', 'One scale per token.', { beside: true });
     op('rsqrt(·+ε)', [ms], r, `Adds ε = ${cfg.normEps} and takes the reciprocal square root.`, stage('mean'));
-    const n32 = tmp('n32', 'x / RMS(x), fp32', dModel, 'fp32', 'Every token vector now has RMS 1.');
+    const n32 = tmp('n32', 'x / RMS(x), fp32', dim, 'fp32', 'Every token vector now has RMS 1.');
     op('×', [x32, r], n32, 'Scales each token vector by its own 1/RMS.', stage('normalize'));
-    const n = tmp('n', `x / RMS(x), ${DTYPES[o.actDtype].label}`, dModel, o.actDtype, 'Cast back before the weight is applied.');
+    const n = tmp('n', `x / RMS(x), ${DTYPES[o.actDtype].label}`, dim, o.actDtype, 'Cast back before the weight is applied.');
     op(`to ${DTYPES[o.actDtype].label}`, [n32], n, 'Casts back to the activation dtype.', stage('normalize'));
-    const out = stacked(id, label, dModel, o.actDtype, TRANSIENT);
-    op('× weight', [n, w], out, `Multiplies each feature by its learned scale: the norm's only ${cfg.dModel} parameters.`, stage('weight'));
+    const out = stacked(id, label, dim, out_.kind === 'kv' ? o.kvDtype : o.actDtype, out_.note ?? TRANSIENT, out_.kind ? { kind: out_.kind } : {});
+    op('× weight', [n, w], out, `Multiplies each feature by its learned scale: the norm's only ${dim.size} parameters.`, stage('weight'));
     return out;
   };
 
-  const ropeOp = (input: string, output: string, heads: number) =>
+  const pairing = cfg.ropeInterleaved ? 'neighboring dimension pairs (2i, 2i+1)' : `dimension pairs (i, i+${half.size})`;
+  const ropeOp = (input: string, output: string, heads: number, what = `in each of the ${heads} heads, rotates ${pairing}`) =>
     op('RoPE', [input, cos, sin], output,
-      `Rotary position embedding: in each of the ${heads} heads, rotates dimension pairs (i, i+${half.size}) by angle pos·θ_i. ` +
+      `Rotary position embedding: ${what} by angle pos·θ_i. ` +
       'No parameters; after it, Q·Kᵀ depends on the distance between positions.', { viz: { panel: 'rope', stage: 'rotate' } });
 
   /**
@@ -414,16 +432,16 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
    * activations. Returns the tokens each expert receives.
    */
   const moe = (l: number, h: string, hNorm: string): number[] => {
-    const { nExperts, topK } = cfg.moe!;
+    const { nExperts, topK, expertFfn, sharedFfn, renormalize, names } = cfg.moe!;
     const experts: Dim = { name: 'experts', size: nExperts };
     const picks: Dim = { name: `top-${topK}`, size: topK };
+    const ffn: Dim = { name: 'd_ffn', size: expertFfn };
     const counts = routing(cfg).counts(l, past, past + n);
-    const block = `model.layers.${l}.block_sparse_moe.`;
-    prefix = block;
+    prefix = `model.layers.${l}.${names.block}.`;
     const stage = (s: VizStage<'moe'>): OpExtra => ({ viz: { panel: 'moe', stage: s } });
     const wr = weight('gate.weight', dModel, experts,
       `The router: scores all ${nExperts} experts for each token. ${formatCount(cfg.dModel * nExperts)} parameters, ` +
-      `against ${formatCount(3 * cfg.dModel * cfg.dFfn)} in each expert. Column e scores expert e.`, { expertAxis: 'z' });
+      `against ${formatCount(3 * cfg.dModel * expertFfn)} in each expert. Column e scores expert e.`, { expertAxis: 'z' });
     const routerLogits = act('router_logits', 'router_logits = h_norm · W_router', experts, { expertAxis: 'x' });
     matmul(hNorm, wr, routerLogits, dModel, experts, stage('router'));
     next();
@@ -441,15 +459,45 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const weights = push({
       id: 'routing_weights', label: 'routing_weights', kind: 'activation', x: topK, z: n, beside: true,
       dims: [tok, picks], dtype: o.actDtype,
-      note: `${TRANSIENT} The top-${topK} probabilities, renormalized to sum to 1: how much each chosen expert's output counts.`,
+      note: renormalize
+        ? `${TRANSIENT} The top-${topK} probabilities, renormalized to sum to 1: how much each chosen expert's output counts.`
+        : `${TRANSIENT} The top-${topK} probabilities as they are (norm_topk_prob false): they sum to less than 1, so the routed experts together count for less than the shared ones.`,
     });
-    op('÷ sum', [routerProbs], weights, `The top-${topK} probabilities divided by their sum, then cast to the activation dtype.`, stage('router'));
+    op(renormalize ? '÷ sum' : `top-${topK} probs`, [routerProbs], weights, renormalize
+      ? `The top-${topK} probabilities divided by their sum, then cast to the activation dtype.`
+      : `The top-${topK} probabilities, not renormalized, cast to the activation dtype.`, stage('router'));
     next();
-    const m = push({
-      id: 'm', label: 'm = Σ routing weight × expert output', kind: 'activation', x: cfg.dModel, z: n, gapBefore: EXPERT_GAP,
+
+    // Shared experts (DeepSeek): one SwiGLU MLP every token runs through, between the router and the sum.
+    let shared: string | undefined;
+    if (sharedFfn) {
+      const sFfn: Dim = { name: 'd_ffn (shared)', size: sharedFfn };
+      const sharedWeight = (name: string, inDim: Dim, outDim: Dim, what: string) =>
+        weight(`shared_experts.${name}.weight`, inDim, outDim, `${what} Shared experts: every token runs through them, unrouted.`, { shared: true });
+      const sharedAct = (id: string, label: string, feat: Dim) =>
+        push({ id: `shared.${id}`, label: `${label} (shared)`, kind: 'activation', x: feat.size, z: n, rowGap: STACK_GAP, dims: [tok, feat], dtype: o.actDtype, shared: true, note: TRANSIENT });
+      const wg = sharedWeight(names.gate, dModel, sFfn, 'Gate projection (W_gate).');
+      const wu = sharedWeight(names.up, dModel, sFfn, 'Up projection (W_up).');
+      const g = sharedAct('g', 'g = h_norm · W_gate', sFfn);
+      matmul(hNorm, wg, g, dModel, sFfn);
+      const u = sharedAct('u', 'u = h_norm · W_up', sFfn);
+      matmul(hNorm, wu, u, dModel, sFfn);
+      next();
+      const wd = sharedWeight(names.down, sFfn, dModel, 'Down projection (W_down).');
+      const a = sharedAct('a', 'a = SiLU(g) ⊙ u', sFfn);
+      op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.', SILU(sharedFfn));
+      shared = sharedAct('y', 'y = a · W_down', dModel);
+      matmul(a, wd, shared, sFfn, dModel);
+      next();
+    }
+    const sum = push({
+      id: shared ? 'm_routed' : 'm', label: `${shared ? '' : 'm = '}Σ routing weight × expert output`, kind: 'activation', x: cfg.dModel, z: n, gapBefore: EXPERT_GAP,
       dims: [tok, dModel], dtype: o.actDtype,
       note: `${TRANSIENT} Starts as zeros; each expert adds its weighted rows into the rows of its tokens, so every row receives ${topK} contributions.`,
     });
+    const m = shared
+      ? push({ id: 'm', label: 'm = routed experts + shared experts', kind: 'activation', x: cfg.dModel, z: n, rowGap: STACK_GAP, dims: [tok, dModel], dtype: o.actDtype, note: TRANSIENT })
+      : sum;
 
     // Every expert reserves room for the busiest expert's activations, so experts keep their place whichever
     // are active: the gate/up station is as wide as g and u, and the deepest station's stack sets each row's depth.
@@ -466,7 +514,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const share = idle
         ? `No token picks expert ${e} in this pass, so its weights are not read.`
         : `Expert ${e} of ${nExperts}: ${formatInt(ne)} of ${formatInt(n)} tokens routed here.`;
-      // The expert index is part of the id: each expert has its own w1, w2 and w3.
+      // The expert index is part of the id: each expert has its own gate, up and down projections.
       const expertWeight = (name: string, inDim: Dim, outDim: Dim, what: string, extra: Partial<TensorSpec> = {}) =>
         weight(`experts.${e}.${name}`, inDim, outDim, `${what} ${share}`, { expert: e, idle, ...extra });
       /** An activation of this expert: one row per token routed to it, stacked in its station. */
@@ -475,9 +523,9 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         dims: [rows, feat], dtype, expert: e, note: `${TRANSIENT} ${note}`,
       });
       // Gate and up projections read the same rows: their weights lie back to back in one station.
-      const w1 = expertWeight('w1.weight', dModel, ffn, 'Gate projection (W_gate).',
-        { reserveWidth: cfg.dFfn, reserveFront, ...(e % cols ? { gapBefore: EXPERT_GAP } : {}) });
-      const w3 = expertWeight('w3.weight', dModel, ffn, 'Up projection (W_up).');
+      const w1 = expertWeight(`${names.gate}.weight`, dModel, ffn, 'Gate projection (W_gate).',
+        { reserveWidth: expertFfn, reserveFront, ...(e % cols ? { gapBefore: EXPERT_GAP } : {}) });
+      const w3 = expertWeight(`${names.up}.weight`, dModel, ffn, 'Up projection (W_up).');
       let g = '', u = '';
       if (!idle) {
         const xe = expertAct('x', 'h_norm rows', dModel, o.actDtype, 'A copy of the h_norm rows of the tokens routed to this expert.');
@@ -489,17 +537,17 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         matmul(xe, w3, u, dModel, ffn, { rows: ne });
       }
       next();
-      const w2 = expertWeight('w2.weight', ffn, dModel, 'Down projection (W_down).', { reserveFront });
+      const w2 = expertWeight(`${names.down}.weight`, ffn, dModel, 'Down projection (W_down).', { reserveFront });
       if (!idle) {
         let a: string;
         if (expanded) {
           const sg = expertAct('silu_g', 'SiLU(g)', ffn, o.actDtype, 'SiLU of the gate, its own tensor.');
-          op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise.', SILU);
+          op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise.', SILU(expertFfn));
           a = expertAct('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, 'The SwiGLU gate.');
-          op('⊙', [sg, u], a, 'Elementwise product with u.', GATE);
+          op('⊙', [sg, u], a, 'Elementwise product with u.', GATE(expertFfn));
         } else {
           a = expertAct('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, 'The SwiGLU gate.');
-          op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.', SILU);
+          op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.', SILU(expertFfn));
         }
         const y = expertAct('y', 'y = a · W_down', dModel, o.actDtype, "This expert's output for its tokens.");
         matmul(a, w2, y, ffn, dModel, { rows: ne });
@@ -514,12 +562,14 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       next();
     }
 
-    op(expanded ? 'index_add' : '× weight, index_add', expanded ? outputs : [...outputs, weights], m,
+    op(expanded ? 'index_add' : '× weight, index_add', expanded ? outputs : [...outputs, weights], sum,
       `${expanded ? '' : 'Scales each expert output row by its routing weight, then '}index_add_ adds the rows back at their tokens' positions. ` +
       `${outputs.length} of ${nExperts} experts contribute in this pass.`, stage('combine'));
+    if (shared) op('+', [sum, shared], m, 'Adds the shared experts\' output to the routed experts\' sum.', stage('combine'));
     op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");
     return counts;
   };
+  /** By decoder layer; dense layers have none. */
   const expertTokens: number[][] = [];
 
   for (let l = 0; l < cfg.nLayers; l++) {
@@ -546,12 +596,13 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       : `${TRANSIENT} Copied into the cache.`);
     const cap = o.cacheCapacity;
     const fresh = decode ? 1 : undefined;
-    const cacheDims = (rows: Dim) => [rows, kvDim];
-    const cacheWrite = (src: string, id: string, label: string, name: 'K' | 'V') => {
+    /** Caches `src` (`dim` wide, split into `heads` if any) as the HF cache does; `name` says what it holds. */
+    const cacheWrite = (src: string, id: string, label: string, name: string, dim: Dim = kvDim, heads: HeadSplit | undefined = kvHeads) => {
+      const cacheDims = (rows: Dim) => [rows, dim];
       if (keepsKv) return src;
       if (isStatic) {
         const buffer = push({
-          id, label, kind: 'kv', x: kvDim.size, z: cap, filledZ: keys, freshZ: fresh, rowGap: STACK_GAP, dtype: o.kvDtype, heads: kvHeads,
+          id, label, kind: 'kv', x: dim.size, z: cap, filledZ: keys, freshZ: fresh, rowGap: STACK_GAP, dtype: o.kvDtype, heads,
           dims: cacheDims({ name: 'capacity', size: cap }),
           note: `Static cache: allocated up front for ${formatInt(cap)} tokens, whatever the prompt length. ` +
             `${formatInt(keys)} slots written so far; each generated token fills one more.`,
@@ -563,12 +614,12 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       }
       // Dynamic cache in decode: the previous cache tensor, then the new one torch.cat builds from it.
       const previous = push({
-        id: `${id}_past`, label: `${label} (previous step)`, kind: 'kv', x: kvDim.size, z: past, superseded: true, heads: kvHeads,
+        id: `${id}_past`, label: `${label} (previous step)`, kind: 'kv', x: dim.size, z: past, superseded: true, heads,
         rowGap: STACK_GAP, dtype: o.kvDtype, dims: cacheDims({ name: 'cached tokens', size: past }),
         note: 'The cache tensor from the previous step. Freed once torch.cat has copied it into the new one.',
       });
       const grown = push({
-        id, label, kind: 'kv', x: kvDim.size, z: keys, filledZ: keys, freshZ: fresh, rowGap: STACK_GAP, dtype: o.kvDtype, heads: kvHeads,
+        id, label, kind: 'kv', x: dim.size, z: keys, filledZ: keys, freshZ: fresh, rowGap: STACK_GAP, dtype: o.kvDtype, heads,
         dims: cacheDims({ name: 'cached tokens', size: keys }),
         note: `${KV} One row longer than before; the newest row is highlighted.`,
       });
@@ -577,6 +628,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         `cache plus the new ${name} row into it, every step. A static cache writes just the one row.`);
       return grown;
     };
+    const keyRows: Dim = { name: decode ? 'cached tokens' : 'T', size: keys };
     let q: string;
     let kCached: string;
     let vCached: string;
@@ -609,6 +661,73 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       third(v, kvDim, 'V');
       vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
       next();
+    } else if (cfg.mla) {
+      // Multi-head latent attention (see MlaConfig): Q as usual, with RoPE on part of each head; K and V expanded
+      // from a small normalized latent, plus one RoPE key shared by all heads.
+      const { kvLoraRank, qkNopeDim, qkRopeDim, vDim: vHead } = cfg.mla;
+      const latent: Dim = { name: 'kv_lora_rank', size: kvLoraRank };
+      const ropeKey: Dim = { name: 'qk_rope_head_dim', size: qkRopeDim };
+      const kvA: Dim = { name: `kv_lora_rank + qk_rope_head_dim (${kvLoraRank} + ${qkRopeDim})`, size: kvLoraRank + qkRopeDim };
+      const kvB: Dim = { name: `${cfg.nHeads}×(qk_nope_head_dim ${qkNopeDim} + v_head_dim ${vHead})`, size: cfg.nHeads * (qkNopeDim + vHead) };
+      const latentCache = o.mlaCache === 'latent';
+      const wq = weight('self_attn.q_proj.weight', dModel, qDim,
+        `Each head's query: ${qkNopeDim} dims matched against K from the latent, then ${qkRopeDim} that carry position. ` +
+        'No query compression in V2-Lite (q_lora_rank null).', { heads: along(qHeads, 'z'), role: 'q' });
+      const qRaw = act('q_raw', 'x_norm · W_q (before RoPE)', qDim, { heads: qHeads });
+      matmul(xNorm, wq, qRaw, dModel, qDim);
+      next();
+      q = act('q', `Q: RoPE on the last ${qkRopeDim} dims of each head`, qDim, { heads: qHeads });
+      ropeOp(qRaw, q, cfg.nHeads, `in each of the ${cfg.nHeads} heads, rotates only the last ${qkRopeDim} of its ${cfg.headDim} dims, ` +
+        `as ${pairing} (decoupled RoPE: the first ${qkNopeDim} carry no position), then copies the parts back together,`);
+      next();
+      const wkvA = weight('self_attn.kv_a_proj_with_mqa.weight', dModel, kvA,
+        `The compression: ${formatInt(cfg.dModel)} features down to a ${kvLoraRank}-dim latent, plus one ${qkRopeDim}-dim key ` +
+        `for RoPE shared by all ${cfg.nHeads} heads (as in multi-query attention: "mqa").`);
+      const kvARaw = act('kv_a', 'x_norm · W_kv_a: latent and RoPE key', kvA);
+      matmul(xNorm, wkvA, kvARaw, dModel, kvA);
+      next();
+      // The normalized latent and the rotated shared key, stacked in one station. With a latent cache they are what
+      // the cache holds.
+      const latentKind = latentCache ? kvKind : 'activation';
+      const latentNote = (what: string) => (latentCache ? kvNote(` The latent cache keeps ${what}: ${kvLoraRank + qkRopeDim} values per token, against ${formatInt(kvDim.size + oDim.size)} for K and V.`) : TRANSIENT);
+      const cKv = rmsNorm(kvARaw, 'self_attn.kv_a_layernorm.weight', 'c_kv', `c_kv = RMSNorm(latent): ${kvLoraRank} dims`, latent,
+        { kind: latentKind, note: latentNote('this latent') });
+      const kPe = act('k_pe', `k_pe = RoPE(shared key): ${qkRopeDim} dims`, ropeKey,
+        { kind: latentKind, note: latentNote('the latent and this key'), rowGap: STACK_GAP });
+      ropeOp(kvARaw, kPe, 1, `rotates the one ${qkRopeDim}-dim key shared by all heads, as ${pairing},`);
+      next();
+      const wkvB = weight('self_attn.kv_b_proj.weight', latent, kvB,
+        `The expansion: each head's K (${qkNopeDim} dims, no position) and V (${vHead}) from the ${kvLoraRank}-dim latent.`,
+        { heads: along(kvHeads, 'z') });
+      // Each head's K joins its no-position part with the shared RoPE key; V is the rest of each head's kv columns.
+      const expandKv = (latentIn: string, keyIn: string, rows: Dim, kExtra: ActOptions, vExtra: ActOptions) => {
+        const kv = act('kv', `c_kv · W_kv_b: each head's K (no RoPE) and V${rows === tok ? '' : ', all cached tokens'}`, kvB,
+          { heads: kvHeads, rows, note: rows === tok ? TRANSIENT : `${TRANSIENT} Recomputed from the whole latent cache every pass.` });
+        matmul(latentIn, wkvB, kv, latent, kvB, { rows: rows.size });
+        next();
+        const k = act('k', `K = [k_nope, k_pe]: ${cfg.headDim} dims per head`, kvDim, { heads: kvHeads, rows, ...kExtra });
+        op('cat', [kv, keyIn], k,
+          `Joins each head's ${qkNopeDim}-dim K with the shared ${qkRopeDim}-dim RoPE key, broadcast to all ${cfg.nHeads} heads: a new tensor.`);
+        const v = act('v', `V: the last ${vHead} of each head's kv columns`, oDim, { heads: kvHeads, rows, rowGap: STACK_GAP, ...vExtra });
+        op('split', [kv], v, `The V part of each head's ${qkNopeDim + vHead} kv columns: a view of kv, no copy.`);
+        return { k, v };
+      };
+      if (latentCache) {
+        const cKvCached = cacheWrite(cKv, 'c_kv_cache', `latent cache, layer ${l}: c_kv`, 'latent', latent, undefined);
+        const kPeCached = cacheWrite(kPe, 'k_pe_cache', `latent cache, layer ${l}: k_pe`, 'RoPE key', ropeKey, undefined);
+        next();
+        const absorb = 'vLLM and SGLang expand like this in prefill; in decode they fold W_kv_b into the query and output ' +
+          'projections instead ("absorption") and attend over the latent directly, never building K and V.';
+        const kv = expandKv(cKvCached, kPeCached, keyRows, { note: `${TRANSIENT} ${absorb}` }, {});
+        kCached = kv.k;
+        vCached = kv.v;
+      } else {
+        const hfNote = ` HF caches K and V expanded: ${formatInt(kvDim.size + oDim.size)} values per token, against ${kvLoraRank + qkRopeDim} for the latent and RoPE key (see MLA cache).`;
+        const kv = expandKv(cKv, kPe, tok, { kind: kvKind, note: kvNote(hfNote) }, { kind: kvKind, note: kvNote('') });
+        kCached = cacheWrite(kv.k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
+        vCached = cacheWrite(kv.v, 'v_cache', `past_key_values.layers[${l}].values`, 'V', oDim);
+      }
+      next();
     } else {
       const wq = weight('self_attn.q_proj.weight', dModel, qDim, undefined, { heads: along(qHeads, 'z'), role: 'q' });
       const qRaw = act('q_raw', 'x_norm · W_q (before RoPE)', qDim, { heads: qHeads });
@@ -637,9 +756,13 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       : '';
     // QKᵀ and ·V are 2 FLOPs per multiply-add each. In prefill the causal mask lets fused kernels skip
     // key > query; a decode query attends to every cached key.
-    const attnFlops = 4 * n * keys * cfg.nHeads * cfg.headDim;
+    const qkFlops = 2 * n * keys * cfg.nHeads * cfg.headDim;
+    const pvFlops = 2 * n * keys * cfg.nHeads * vHeadDim(cfg);
+    const attnFlops = qkFlops + pvFlops;
+    // YaRN raises the softmax temperature to match the stretched positions.
+    const scoreScale = yarnScoreScale(cfg);
+    const scaleNote = scoreScale === 1 ? '' : ` YaRN multiplies the scores by ${scoreScale.toFixed(3)} (mscale²).`;
     const usefulFlops = decode ? attnFlops : (attnFlops * (n + 1)) / (2 * n);
-    const keyRows: Dim = { name: decode ? 'cached tokens' : 'T', size: keys };
     let attn: string;
     if (o.attention === 'eager') {
       // HF eager_attention_forward: every step below allocates a new tensor.
@@ -668,8 +791,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const scores = scoreGrid('scores', 'QKᵀ/√d', o.actDtype,
         decode ? 'One row of scores per head: the new token against every cached key.' : 'Raw scores, computed in full: including the half the mask is about to discard.', false);
       op('QKᵀ/√d', [q, kRep], scores,
-        `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}. ${formatFlops(attnFlops / 2)} FLOPs${decode ? '' : ', half of them for entries the mask discards'}.${staticNote}`,
-        { flops: attnFlops / 2, ...SCORES });
+        `Per head: Q Kᵀ scaled by 1/√${cfg.headDim}.${scaleNote} ${formatFlops(qkFlops)} FLOPs${decode ? '' : ', half of them for entries the mask discards'}.${staticNote}`,
+        { flops: qkFlops, ...SCORES });
       let masked = scores;
       if (!decode) {
         masked = scoreGrid('scores_masked', 'QKᵀ/√d + mask', o.actDtype, 'Entries with key > query are now −∞.', true);
@@ -680,23 +803,23 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const probs = scoreGrid('probs', `softmax(…) cast to ${DTYPES[o.actDtype].label}`, o.actDtype, 'Attention probabilities cast back to the activation dtype for the · V matmul.', true);
       op(`to ${DTYPES[o.actDtype].label}`, [probs32], probs, 'Casts the probabilities back to the activation dtype: another full copy.', SOFTMAX);
       next();
-      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim, { heads: qHeads });
-      op('· V', [probs, vRep], attn, `Per head: probability-weighted sum of V rows. ${formatFlops(attnFlops / 2)} FLOPs.`,
-        { flops: attnFlops / 2, viz: { panel: 'attention', stage: 'output' } });
+      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads });
+      op('· V', [probs, vRep], attn, `Per head: probability-weighted sum of V rows. ${formatFlops(pvFlops)} FLOPs.`,
+        { flops: pvFlops, viz: { panel: 'attention', stage: 'output' } });
     } else {
-      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', qDim, { heads: qHeads });
+      attn = act('attn', 'attn = softmax(QKᵀ/√d) · V', oDim, { heads: qHeads });
       op('attention', [q, kCached, vCached], attn,
         'softmax(QKᵀ/√d)·V per head, fused (FlashAttention / SDPA): no repeat_kv copies, no mask tensor, and the scores never reach memory. ' +
         (decode
           ? `The new token attends to all ${formatInt(keys)} cached keys: ${formatFlops(attnFlops)} FLOPs, reading the whole K and V cache.`
           : `Causal: query i only attends to keys 0..i, so ~${formatFlops(usefulFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`) +
-        staticNote, { flops: usefulFlops, ...SCORES });
+        scaleNote + staticNote, { flops: usefulFlops, ...SCORES });
     }
     next();
-    const wo = weight(gpt2 ? 'attn.c_proj.weight' : 'self_attn.o_proj.weight', qDim, dModel, undefined, { heads: qHeads });
+    const wo = weight(gpt2 ? 'attn.c_proj.weight' : 'self_attn.o_proj.weight', oDim, dModel, undefined, { heads: qHeads });
     const bo = gpt2 ? vector('attn.c_proj.bias', dModel) : undefined;
     const oOut = act('o', `o = attn · W_o${bo ? ' + b' : ''}`, dModel);
-    matmul(attn, wo, oOut, qDim, dModel, { bias: bo });
+    matmul(attn, wo, oOut, oDim, dModel, { bias: bo });
     next();
     const h = act('h', 'h = x + o: residual stream', dModel, { residual: true });
     op('+', [x, oOut], h, 'Residual add: the attention output is added to the residual stream.');
@@ -705,8 +828,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     nextSection();
     const hNorm = norm(h, ['post_attention_layernorm', 'ln_2'], 'h_norm', 'h');
     next();
-    if (cfg.moe) {
-      expertTokens.push(moe(l, h, hNorm));
+    if (isMoeLayer(cfg, l)) {
+      expertTokens[l] = moe(l, h, hNorm);
       continue;
     }
     if (gpt2) {
@@ -742,12 +865,12 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     if (o.elementwise === 'expanded') {
       // HF: act_fn(gate_proj(x)) * up_proj(x): SiLU(g) is its own tensor before the product.
       const sg = stacked('silu_g', 'SiLU(g)', ffn, o.actDtype, TRANSIENT);
-      op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise: a full T × d_ffn tensor of its own.', SILU);
+      op('SiLU', [g], sg, 'SiLU(g) = g · sigmoid(g), elementwise: a full T × d_ffn tensor of its own.', SILU(cfg.dFfn));
       a = stacked('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, TRANSIENT);
-      op('⊙', [sg, u], a, 'Elementwise product with u: the SwiGLU gate.', GATE);
+      op('⊙', [sg, u], a, 'Elementwise product with u: the SwiGLU gate.', GATE(cfg.dFfn));
     } else {
       a = stacked('a', 'a = SiLU(g) ⊙ u', ffn, o.actDtype, TRANSIENT);
-      op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.', SILU);
+      op('SiLU ⊙', [g, u], a, 'SwiGLU: elementwise SiLU(g) times u.', SILU(cfg.dFfn));
     }
     const m = stacked('m', 'm = a · W_down', dModel, o.actDtype, TRANSIENT);
     matmul(a, wd, m, ffn, dModel);

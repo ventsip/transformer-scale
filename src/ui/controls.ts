@@ -1,7 +1,7 @@
 import type { ThicknessMode } from '../layout';
 import { MODELS, type ModelId } from '../model/config';
 import type { DType } from '../model/dtypes';
-import type { AttentionImpl, ElementwiseDetail, KvCacheImpl, Mode } from '../model/tensors';
+import type { AttentionImpl, ElementwiseDetail, KvCacheImpl, MlaCache, Mode } from '../model/tensors';
 import { formatInt } from '../format';
 
 export interface Settings {
@@ -16,6 +16,8 @@ export interface Settings {
   elementwise: ElementwiseDetail;
   /** Slots per layer in a static cache (not a control: the model's maximum context). */
   cacheCapacity: number;
+  /** Multi-head latent attention models only. */
+  mlaCache: MlaCache;
   showFlow: boolean;
   thickness: ThicknessMode;
   weightDtype: DType;
@@ -28,6 +30,8 @@ export interface Settings {
 
 export interface ControlsOptions {
   maxT: number;
+  /** The model has multi-head latent attention: offer the MLA cache setting. */
+  mla: boolean;
   floorCount: number;
   floorName: (floor: number) => string;
   onChange: (key: keyof Settings) => void;
@@ -125,6 +129,7 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
   row('Attention', select('attention', [['fused', 'Fused (FlashAttention / SDPA)'], ['eager', 'Eager (one tensor per step)']]));
   row('Elementwise ops', select('elementwise', [['compact', 'Compact (norms, activations as one op)'], ['expanded', 'Expanded (every intermediate)']]));
   row('KV cache', select('kvCache', [['dynamic', 'Dynamic (grows with tokens)'], ['static', `Static (preallocated, ${formatInt(s.cacheCapacity)} slots)`]]));
+  if (o.mla) row('MLA cache', select('mlaCache', [['hf', 'K, V expanded (HF)'], ['latent', 'Latent + RoPE key (vLLM, SGLang)']]));
 
   row('Thickness', select('thickness', [['bytes', 'Bytes per element'], ['elements', 'Uniform (elements only)']]));
   row('Weights dtype', select('weightDtype', [['bf16', 'bf16'], ['fp8', 'fp8'], ['int4', 'int4'], ['fp32', 'fp32']]));

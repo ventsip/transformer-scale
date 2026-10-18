@@ -35,6 +35,7 @@ const settings: Settings = {
   kvCache: 'dynamic',
   elementwise: 'compact',
   cacheCapacity: cfg.maxContext,
+  mlaCache: 'hf',
   showFlow: true,
   thickness: 'bytes',
   weightDtype: 'bf16',
@@ -193,6 +194,7 @@ const createUi = () => {
   controlsEl.replaceChildren();
   return createControls(controlsEl, settings, {
     maxT: cfg.maxContext,
+    mla: !!cfg.mla,
     floorCount: floorCount(cfg),
     floorName: (f) => floorName(cfg, f),
     onChange: (key) => {

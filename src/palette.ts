@@ -30,6 +30,7 @@ export const PALETTE = {
   trayMlp: 0xa0785a,
   trayRouter: 0x4f9a94,
   trayExpert: 0xc9a27a,
+  trayShared: 0xd4b483,
   // Lights: the hemisphere light's ground color.
   ground: 0x223344,
   // Neutrals (lightest to darkest) and accents, for masked blocks, chart lines and backgrounds.
