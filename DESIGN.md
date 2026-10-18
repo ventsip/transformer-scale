@@ -36,8 +36,8 @@
 - Flow is drawn for the focused floor, plus the op on the floor below that produces its input. An op whose output is
   on a higher floor sits just below that output; its inputs rise to it. Edges between
   floors are risers: they leave heading up and enter the upper block from below. Inputs from a lower floor into an op
-  that hovers over its output (cos / sin into RoPE, the causal mask) climb in front of the focused floor instead and come
-  down into the op from above, so they never pass through the block the op produces.
+  that hovers over its output (cos / sin into RoPE, the causal mask) climb in front of the focused floor instead,
+  side by side, and run level into the op from the front, so they never pass through the block the op produces.
 
 ## Operation popups
 
