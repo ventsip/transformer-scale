@@ -86,6 +86,8 @@ function normStage(op: OpSpec): NormStage | null {
   const m = /^[xh]_norm(?:\.(\w+))?$/.exec(op.output.split(':')[1]);
   if (!m) return null;
   const step = m[1];
+  // GPT-2's LayerNorm writes x_norm too, but this panel is RMSNorm's.
+  if (op.label === 'LayerNorm') return null;
   if (step === undefined) return op.label === 'RMSNorm' ? 'input' : 'weight';
   if (step === 'fp32') return 'input';
   if (step === 'sq' || step === 'mean' || step === 'rsqrt') return 'mean';
@@ -543,14 +545,15 @@ function tokens(n: number): string {
 
 function ropeViz(body: HTMLElement, focus: RopeStage): void {
   const pairs = model.headDim / 2;
-  const theta = Array.from({ length: pairs }, (_, i) => model.ropeTheta ** ((-2 * i) / model.headDim));
+  const base = model.ropeTheta!;
+  const theta = Array.from({ length: pairs }, (_, i) => base ** ((-2 * i) / model.headDim));
   const wavelength = theta.map((t) => (2 * Math.PI) / t);
   const ctx = model.maxContext;
 
   // 1. Frequencies.
   const sFreq = stageSection(body, focus === 'freq', 'θ_i: one frequency per dimension pair',
     `Each head's ${model.headDim} dimensions form ${pairs} pairs; pair i rotates by θ_i = ` +
-    `${model.ropeTheta.toLocaleString('en-US')}^(−2i/${model.headDim}) radians per token. ` +
+    `${base.toLocaleString('en-US')}^(−2i/${model.headDim}) radians per token. ` +
     `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice to fill head_dim.`);
   const cFreq = barChart('wavelength 2π/θ_i in tokens (log scale), by pair', 'line: context length');
   const fFreq = el('div', { className: 'op-popup-facts' });
@@ -772,11 +775,12 @@ const ROW_HEAD = 36;
 const ROW_TAIL = 12;
 
 /**
- * The prompt as (token, id) pairs. The beginning-of-text ids are the real ones (Llama 3: 128000, Mixtral: 1);
- * the others are illustrative, derived from the word so that repeated words share an id, as they do in a tokenizer.
+ * The prompt as (token, id) pairs. The beginning-of-text token is the model's real one (Llama 3: 128000, Mixtral: 1,
+ * GPT-2: 50256); the others are illustrative, derived from the word so that repeated words share an id, as they do in
+ * a tokenizer.
  */
 function lookupTokens(): { text: string; id: number }[] {
-  const bos = model.vocabSize > 100000 ? { text: '<|begin_of_text|>', id: 128000 } : { text: '<s>', id: 1 };
+  const bos = model.bos;
   const hash = (w: string) => [...w].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
   return [bos, ...LOOKUP_WORDS.map((w) => ({ text: w, id: 1000 + (hash(w) % (Math.min(model.vocabSize, 100000) - 2000)) }))];
 }
@@ -820,8 +824,11 @@ function lookupViz(body: HTMLElement): void {
     `In this pass: <b>${rows.toLocaleString('en-US')}</b> ${rows === 1 ? 'row' : 'rows'} × ${formatBytes(rowBytes)} = ` +
     `<b>${formatBytes(rows * rowBytes)}</b> read from a <b>${formatBytes(tableBytes)}</b> table ` +
     `(${((100 * rows * rowBytes) / tableBytes).toPrecision(2)}%), and <b>0</b> FLOPs. ` +
-    'The LM head at the top is the opposite: a full matrix multiply against a second table of the same shape ' +
-    '(not tied to this one in Llama 3 or Mixtral), scoring every vocabulary entry.';
+    (model.arch === 'gpt2'
+      ? 'The LM head at the top is the opposite: a full matrix multiply against this very table (tied weights), ' +
+        'scoring every vocabulary entry.'
+      : 'The LM head at the top is the opposite: a full matrix multiply against a second table of the same shape ' +
+        `(not tied to this one in ${model.name}), scoring every vocabulary entry.`);
 
   const rowY = (id: number) => table.y + (id / V) * table.h;
   const chipY = (i: number) => top + i * rowH + rowH / 2;
@@ -1062,7 +1069,10 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
     : `At T = <b>${T.toLocaleString('en-US')}</b> each head's grid is ${T.toLocaleString('en-US')} × ${T.toLocaleString('en-US')}: ` +
       `<b>${formatBytes(scoreBytes)}</b> per layer for ${model.nHeads} heads in bf16, and eager attention allocates it several times ` +
       '(scores, masked, fp32 softmax, cast). Fused kernels (FlashAttention / SDPA) never write it: they stream key blocks ' +
-      `and keep a running softmax. Grouped-query attention: this head shares its K and V with ${perGroup - 1} other query heads.`;
+      'and keep a running softmax. ' +
+      (perGroup > 1
+        ? `Grouped-query attention: this head shares its K and V with ${perGroup - 1} other query heads.`
+        : 'Multi-head attention: this head has K and V of its own, so the KV cache holds one pair per query head.');
 
   function probsOf(i: number): number[] {
     const row = raw[i].map((v, j) => (causal && j > i ? -Infinity : v));

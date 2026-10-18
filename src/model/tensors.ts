@@ -174,7 +174,10 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const kvDim: Dim = { name: `kv_dim (${cfg.nKvHeads}×${cfg.headDim})`, size: cfg.nKvHeads * cfg.headDim };
   const ffn: Dim = { name: 'd_ffn', size: cfg.dFfn };
   const vocab: Dim = { name: 'vocab', size: cfg.vocabSize };
-  const gqaNote = `Grouped-query attention: ${cfg.nKvHeads} KV heads shared by ${cfg.nHeads} query heads.`;
+  const gpt2 = cfg.arch === 'gpt2';
+  const gqaNote = cfg.nKvHeads === cfg.nHeads
+    ? `Multi-head attention: each of the ${cfg.nHeads} query heads has its own K and V head.`
+    : `Grouped-query attention: ${cfg.nKvHeads} KV heads shared by ${cfg.nHeads} query heads.`;
 
   let floor = 0;
   let section = 0;
@@ -212,11 +215,11 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   };
   const op = (label: string, inputs: string[], output: string, note: string, flops?: number) =>
     ops.push({ id: `${floor}:op:${ops.length}`, label, floor, inputs, output, note, flops });
-  /** `rows`: tokens multiplied, when fewer than the pass's (an expert's share). */
-  const matmul = (input: string, w: string, output: string, inDim: Dim, outDim: Dim, rows = n) => {
+  /** `rows`: tokens multiplied, when fewer than the pass's (an expert's share). `bias`: added in the same kernel. */
+  const matmul = (input: string, w: string, output: string, inDim: Dim, outDim: Dim, rows = n, bias?: string) => {
     const flops = 2 * rows * inDim.size * outDim.size;
-    op('@', [input, w], output,
-      `Matrix multiply: [${rows} × ${inDim.size}] @ [${inDim.size} × ${outDim.size}] → [${rows} × ${outDim.size}]. ` +
+    op('@', bias ? [input, w, bias] : [input, w], output,
+      `Matrix multiply${bias ? ' plus bias (one fused addmm)' : ''}: [${rows} × ${inDim.size}] @ [${inDim.size} × ${outDim.size}] → [${rows} × ${outDim.size}]. ` +
       `${formatFlops(flops)} FLOPs, reading all ${formatFlops(inDim.size * outDim.size)} weights` +
       (decode ? ': about 1 FLOP per weight byte, so decode waits on memory.' : '.'), flops);
   };
@@ -227,30 +230,52 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   };
   const nextFloorX = () => `${floor + 1}:x`;
 
-  // Embedding floor: rotary tables first (they feed every layer), then the token embedding.
-  prefix = 'model.';
+  // Embedding floor. Llama: rotary tables first (they feed every layer), then the token embedding. GPT-2: a learned
+  // position table, looked up and added to the token embedding.
+  const top = gpt2 ? 'transformer.' : 'model.';
+  prefix = top;
   const half: Dim = { name: 'head_dim / 2', size: cfg.headDim / 2 };
   const headDim: Dim = { name: 'head_dim', size: cfg.headDim };
-  const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
-  const invFreq = push({
-    id: 'rotary_emb.inv_freq', label: 'model.rotary_emb.inv_freq', kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
-    note: `RoPE frequencies θ_i = ${cfg.ropeTheta.toLocaleString('en-US')}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
-      `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * cfg.ropeTheta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
-  });
   // position_ids gets its own station after the RoPE tables, next to input_ids; they already read it.
   const pos = `${floor}:position_ids`;
-  next();
-  const cos = act('cos', 'cos(pos · θ): RoPE table', headDim, 'activation', ropeNote);
-  op('cos(pos·θ)', [pos, invFreq], cos, 'Outer product of positions and frequencies, then cosine; the 64 angles are repeated to fill head_dim.');
-  next();
-  const sin = act('sin', 'sin(pos · θ): RoPE table', headDim, 'activation', ropeNote);
-  op('sin(pos·θ)', [pos, invFreq], sin, 'Outer product of positions and frequencies, then sine; the 64 angles are repeated to fill head_dim.');
-  next();
+  let cos = '';
+  let sin = '';
+  if (!gpt2) {
+    const theta = cfg.ropeTheta!;
+    const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
+    const invFreq = push({
+      id: 'rotary_emb.inv_freq', label: 'model.rotary_emb.inv_freq', kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
+      note: `RoPE frequencies θ_i = ${theta.toLocaleString('en-US')}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
+        `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * theta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
+    });
+    next();
+    cos = act('cos', 'cos(pos · θ): RoPE table', headDim, 'activation', ropeNote);
+    op('cos(pos·θ)', [pos, invFreq], cos, 'Outer product of positions and frequencies, then cosine; the 64 angles are repeated to fill head_dim.');
+    next();
+    sin = act('sin', 'sin(pos · θ): RoPE table', headDim, 'activation', ropeNote);
+    op('sin(pos·θ)', [pos, invFreq], sin, 'Outer product of positions and frequencies, then sine; the 64 angles are repeated to fill head_dim.');
+    next();
+  }
   push({
     id: 'position_ids', label: 'position_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64',
     note: decode ? `Position of the new token: ${past.toLocaleString('en-US')}.` : 'Position of each prompt token: 0 … T−1.',
   });
   next();
+  /** Lookup of `rows` rows of `table`, which reads only those rows. */
+  const lookup = (label: string, inputs: string[], table: string, output: string, note: string) => {
+    op(label, inputs, output, note);
+    ops[ops.length - 1].inputBytes = { [table]: n * cfg.dModel * DTYPES[o.weightDtype].bytes };
+  };
+  let posEmb = '';
+  if (gpt2) {
+    const positions: Dim = { name: 'positions', size: cfg.maxContext };
+    const wpe = weight('wpe.weight', positions, dModel,
+      `Learned position embeddings: one row per position, ${cfg.maxContext.toLocaleString('en-US')} of them, so the context ` +
+      `cannot grow past ${cfg.maxContext.toLocaleString('en-US')} tokens. Parameters, unlike RoPE.`);
+    posEmb = act('pos_emb', 'position embeddings', dModel, 'activation', `${TRANSIENT} One row of wpe per position.`);
+    lookup('position lookup', [pos, wpe], wpe, posEmb, 'Copies the row of each position from wpe. No arithmetic.');
+    next();
+  }
   // Eager prefill needs an explicit causal mask; a single decode query may attend to every cached key.
   let causalMask: string | undefined;
   if (o.attention === 'eager' && !decode) {
@@ -262,18 +287,40 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     op('causal mask', [pos], causalMask, 'Builds the T×T additive causal mask from the positions.');
     next();
   }
-  const embed = weight('embed_tokens.weight', vocab, dModel, 'Lookup table: each token id selects one row.');
+  const embed = weight(gpt2 ? 'wte.weight' : 'embed_tokens.weight', vocab, dModel,
+    gpt2 ? 'Token embeddings: each token id selects one row. The LM head reuses this table (tied weights).'
+      : 'Lookup table: each token id selects one row.');
   const ids = push({
     id: 'input_ids', label: 'input_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64',
     note: decode ? 'The token sampled by the previous step.' : 'Token ids of the prompt.',
   });
-  op('lookup', [ids, embed], nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
-  // The lookup reads only the rows it selects, not the whole table.
-  ops[ops.length - 1].inputBytes = { [embed]: n * cfg.dModel * DTYPES[o.weightDtype].bytes };
+  if (gpt2) {
+    const tokEmb = act('tok_emb', 'token embeddings', dModel, 'activation', `${TRANSIENT} One row of wte per token.`);
+    tensors[tensors.length - 1].rowGap = STACK_GAP;
+    lookup('lookup', [ids, embed], embed, tokEmb, 'Embedding lookup: copies one row per token. No arithmetic.');
+    op('+', [tokEmb, posEmb], nextFloorX(), "Token plus position embedding: the residual stream's start, layer 0's input.");
+  } else {
+    lookup('lookup', [ids, embed], embed, nextFloorX(), 'Embedding lookup: copies one row per token. No arithmetic.');
+  }
   /** An activation stacked behind the previous one in its station's front row, with room for its op. */
   const stacked = (id: string, label: string, feat: Dim, dtype: DType, note: string) =>
     push({ id, label, kind: 'activation', x: feat.size, z: n, rowGap: STACK_GAP, dims: [tok, feat], dtype, note });
   const one: Dim = { name: '1', size: 1 };
+
+  /**
+   * The model's norm. `names`: [llama, gpt2] module names, e.g. ['input_layernorm', 'ln_1']. GPT-2's LayerNorm is
+   * torch.nn.LayerNorm: one fused kernel, so even expanded it allocates nothing but its output.
+   */
+  const norm = (input: string, names: [string, string], id: string, what: string) => {
+    if (!gpt2) return rmsNorm(input, `${names[0]}.weight`, id, `${id} = RMSNorm(${what})`);
+    const w = vector(`${names[1]}.weight`, dModel);
+    const b = vector(`${names[1]}.bias`, dModel);
+    const out = act(id, `${id} = LayerNorm(${what})`, dModel);
+    op('LayerNorm', [input, w, b], out,
+      `Per token: subtract the mean, divide by √(variance + ${cfg.normEps}), then × weight + bias (${2 * cfg.dModel} parameters). ` +
+      'One fused kernel (torch.nn.LayerNorm): no intermediate tensors, unlike Llama\'s RMSNorm written in PyTorch.');
+    return out;
+  };
 
   /** RMSNorm with its weight; expanded, every intermediate HF's LlamaRMSNorm allocates. */
   const rmsNorm = (input: string, weightName: string, id: string, label: string) => {
@@ -293,7 +340,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     op('mean', [sq], ms, `Mean over the ${cfg.dModel} features of each token.`);
     const r = tmp('rsqrt', '1/√(mean(x²) + ε)', one, 'fp32', 'One scale per token.');
     tensors.find((t) => t.id === r)!.beside = true;
-    op('rsqrt(·+ε)', [ms], r, `Adds ε = ${cfg.rmsNormEps} and takes the reciprocal square root.`);
+    op('rsqrt(·+ε)', [ms], r, `Adds ε = ${cfg.normEps} and takes the reciprocal square root.`);
     const n32 = tmp('n32', 'x / RMS(x), fp32', dModel, 'fp32', 'Every token vector now has RMS 1.');
     op('×', [x32, r], n32, 'Scales each token vector by its own 1/RMS.');
     const n = tmp('n', `x / RMS(x), ${DTYPES[o.actDtype].label}`, dModel, o.actDtype, 'Cast back before the weight is applied.');
@@ -430,23 +477,12 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     floor = l + 1;
     section = 0;
     station = 0;
-    prefix = `model.layers.${l}.`;
+    prefix = gpt2 ? `transformer.h.${l}.` : `model.layers.${l}.`;
 
     // Attention section.
     const x = residual(act('x', 'x: residual stream in', dModel, 'activation', `${TRANSIENT} Embeddings for layer 0, the previous layer's output otherwise.`));
     next();
-    const xNorm = rmsNorm(x, 'input_layernorm.weight', 'x_norm', 'x_norm = RMSNorm(x)');
-    next();
-    const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
-    const qRaw = split(act('q_raw', 'x_norm · W_q (before RoPE)', qDim), qHeads);
-    matmul(xNorm, wq, qRaw, dModel, qDim);
-    next();
-    const q = split(act('q', 'Q = RoPE(x_norm · W_q)', qDim), qHeads);
-    ropeOp(qRaw, q, cfg.nHeads);
-    next();
-    const wk = split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
-    const kRaw = split(act('k_raw', 'x_norm · W_k (before RoPE)', kvDim), kvHeads);
-    matmul(xNorm, wk, kRaw, dModel, kvDim);
+    const xNorm = norm(x, ['input_layernorm', 'ln_1'], 'x_norm', 'x');
     next();
     // Where K and V live afterwards:
     // - dynamic, prefill: the cache keeps K and V themselves;
@@ -492,15 +528,56 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         `cache plus the new ${name} row into it, every step. A static cache writes just the one row.`);
       return grown;
     };
-    const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, kvKind, kvNote(' Cached after rotation, so the cache already encodes position.')), kvHeads);
-    ropeOp(kRaw, k, cfg.nKvHeads);
-    const kCached = cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
-    next();
-    const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
-    const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
-    matmul(xNorm, wv, v, dModel, kvDim);
-    const vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
-    next();
+    let q: string;
+    let kCached: string;
+    let vCached: string;
+    if (gpt2) {
+      // One fused projection (c_attn, a Conv1D: x · W + b) yields Q, K and V side by side, as views of one [T × 3d]
+      // tensor. Drawn as its three column blocks, each reading a third of the weight; position is already in x.
+      const qkvDim: Dim = { name: '3 · d_model (Q, K, V)', size: 3 * cfg.dModel };
+      const wqkv = weight('attn.c_attn.weight', dModel, qkvDim,
+        `Q, K and V projections fused into one matrix (Conv1D: input dim first). ${gqaNote}`);
+      const bqkv = vector('attn.c_attn.bias', qkvDim);
+      const third = (out: string, dim: Dim, what: string) => {
+        matmul(xNorm, wqkv, out, dModel, dim, n, bqkv);
+        const last = ops[ops.length - 1];
+        last.note = `${what}: one third of c_attn, the fused projection. ${last.note} In HF one matmul yields Q, K and V ` +
+          `together, as views of one [${n} × ${3 * cfg.dModel}] tensor.`;
+        last.inputBytes = { [wqkv]: cfg.dModel * dim.size * DTYPES[o.weightDtype].bytes, [bqkv]: dim.size * DTYPES[o.weightDtype].bytes };
+      };
+      q = split(act('q', 'Q = x_norm · W_attn[Q] + b', qDim), qHeads);
+      third(q, qDim, 'Q');
+      next();
+      const k = split(act('k', 'K = x_norm · W_attn[K] + b', kvDim, kvKind, kvNote(' Learned positions were added at the bottom, so K carries no rotation.')), kvHeads);
+      third(k, kvDim, 'K');
+      kCached = cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
+      next();
+      const v = split(act('v', 'V = x_norm · W_attn[V] + b', kvDim, kvKind, kvNote('')), kvHeads);
+      third(v, kvDim, 'V');
+      vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
+      next();
+    } else {
+      const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
+      const qRaw = split(act('q_raw', 'x_norm · W_q (before RoPE)', qDim), qHeads);
+      matmul(xNorm, wq, qRaw, dModel, qDim);
+      next();
+      q = split(act('q', 'Q = RoPE(x_norm · W_q)', qDim), qHeads);
+      ropeOp(qRaw, q, cfg.nHeads);
+      next();
+      const wk = split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+      const kRaw = split(act('k_raw', 'x_norm · W_k (before RoPE)', kvDim), kvHeads);
+      matmul(xNorm, wk, kRaw, dModel, kvDim);
+      next();
+      const k = split(act('k', 'K = RoPE(x_norm · W_k)', kvDim, kvKind, kvNote(' Cached after rotation, so the cache already encodes position.')), kvHeads);
+      ropeOp(kRaw, k, cfg.nKvHeads);
+      kCached = cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
+      next();
+      const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+      const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
+      matmul(xNorm, wv, v, dModel, kvDim);
+      vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
+      next();
+    }
     // Attention reads K and V from the cache.
     const staticNote = isStatic
       ? ` With a static cache HF attends over all ${cap.toLocaleString('en-US')} slots, masking the empty ones; drawn here for the ${keys.toLocaleString('en-US')} filled slots only.`
@@ -513,14 +590,20 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     let attn: string;
     if (o.attention === 'eager') {
       // HF eager_attention_forward: every step below allocates a new tensor.
+      // repeat_kv copies K and V to line up with the query heads; with multi-head attention there is nothing to
+      // repeat, and HF returns them unchanged.
       const perGroup = cfg.nHeads / cfg.nKvHeads;
-      const repNote = `${TRANSIENT} Each KV head copied ${perGroup}× to line up with the query heads.`;
-      const kRep = split(act('k_rep', 'repeat_kv(K)', qDim, 'activation', repNote, keyRows), qHeads);
-      op('repeat_kv', [kCached], kRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×: GQA saves cache memory, but eager attention spends it again on temporaries.`);
-      next();
-      const vRep = split(act('v_rep', 'repeat_kv(V)', qDim, 'activation', repNote, keyRows), qHeads);
-      op('repeat_kv', [vCached], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
-      next();
+      let kRep = kCached;
+      let vRep = vCached;
+      if (perGroup > 1) {
+        const repNote = `${TRANSIENT} Each KV head copied ${perGroup}× to line up with the query heads.`;
+        kRep = split(act('k_rep', 'repeat_kv(K)', qDim, 'activation', repNote, keyRows), qHeads);
+        op('repeat_kv', [kCached], kRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×: GQA saves cache memory, but eager attention spends it again on temporaries.`);
+        next();
+        vRep = split(act('v_rep', 'repeat_kv(V)', qDim, 'activation', repNote, keyRows), qHeads);
+        op('repeat_kv', [vCached], vRep, `Copies each of the ${cfg.nKvHeads} KV heads ${perGroup}×.`);
+        next();
+      }
       // One tile per head: keys along X, queries along Z. Prefill tiles are square and causally masked.
       // The steps from raw scores to probabilities stack in one station, like an expanded RMSNorm.
       const scoreGrid = (id: string, label: string, dtype: DType, note: string, causal: boolean) => split(push({
@@ -555,19 +638,39 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         staticNote, usefulFlops);
     }
     next();
-    const wo = split(weight('self_attn.o_proj.weight', qDim, dModel), qHeads);
-    const oOut = act('o', 'o = attn · W_o', dModel);
-    matmul(attn, wo, oOut, qDim, dModel);
+    const wo = split(weight(gpt2 ? 'attn.c_proj.weight' : 'self_attn.o_proj.weight', qDim, dModel), qHeads);
+    const bo = gpt2 ? vector('attn.c_proj.bias', dModel) : undefined;
+    const oOut = act('o', `o = attn · W_o${bo ? ' + b' : ''}`, dModel);
+    matmul(attn, wo, oOut, qDim, dModel, n, bo);
     next();
     const h = residual(act('h', 'h = x + o: residual stream', dModel));
     op('+', [x, oOut], h, 'Residual add: the attention output is added to the residual stream.');
 
     // MLP section, behind the attention section.
     nextSection();
-    const hNorm = rmsNorm(h, 'post_attention_layernorm.weight', 'h_norm', 'h_norm = RMSNorm(h)');
+    const hNorm = norm(h, ['post_attention_layernorm', 'ln_2'], 'h_norm', 'h');
     next();
     if (cfg.moe) {
       expertTokens.push(moe(l, h, hNorm));
+      continue;
+    }
+    if (gpt2) {
+      // Two matrices with a GELU between them (4 · d_model wide), each with a bias. Laid out like the SwiGLU MLP:
+      // the up projection with its output in front, then the down projection with the GELU output and m.
+      const wfc = weight('mlp.c_fc.weight', dModel, ffn);
+      const bfc = vector('mlp.c_fc.bias', ffn);
+      const hfc = stacked('h_fc', 'h_fc = h_norm · W_fc + b', ffn, o.actDtype, TRANSIENT);
+      matmul(hNorm, wfc, hfc, dModel, ffn, n, bfc);
+      next();
+      const wproj = weight('mlp.c_proj.weight', ffn, dModel);
+      const bproj = vector('mlp.c_proj.bias', dModel);
+      const a = stacked('a', 'a = GELU(h_fc)', ffn, o.actDtype, TRANSIENT);
+      op('GELU', [hfc], a,
+        'GELU, tanh approximation ("gelu_new"): 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³))). HF writes it in ' +
+        'plain PyTorch, so each step (x³, products, tanh, sums) passes a full T × d_ffn temporary through memory; drawn as one op.');
+      const m = stacked('m', 'm = a · W_proj + b', dModel, o.actDtype, TRANSIENT);
+      matmul(a, wproj, m, ffn, dModel, n, bproj);
+      op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");
       continue;
     }
     // Laid out like one expert of a mixture of experts (see moe): gate and up projections read the same rows, so their
@@ -600,20 +703,24 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   floor = cfg.nLayers + 1;
   section = 0;
   station = 0;
-  prefix = 'model.';
+  prefix = top;
   const xLast = residual(act('x', 'x: residual stream out of the last layer', dModel));
   next();
-  const xNorm = rmsNorm(xLast, 'norm.weight', 'x_norm', 'x_norm = RMSNorm(x): final norm');
+  const xNorm = norm(xLast, ['norm', 'ln_f'], 'x_norm', 'x');
   next();
   prefix = '';
-  const head = weight('lm_head.weight', dModel, vocab, `Not tied to the embedding: a second ${formatCount(cfg.dModel * cfg.vocabSize)}-parameter matrix.`);
+  // GPT-2 ties the LM head to the token embedding: the logits read wte on the embedding floor, the same table the
+  // lookup at the bottom reads one row of per token. Llama 3 and Mixtral have a second matrix.
+  const head = gpt2 ? embed
+    : weight('lm_head.weight', dModel, vocab, `Not tied to the embedding: a second ${formatCount(cfg.dModel * cfg.vocabSize)}-parameter matrix.`);
   const logits = push({
     id: 'logits', label: 'logits: last position only', kind: 'activation', x: cfg.vocabSize, z: 1,
     dims: [{ name: 'last token', size: 1 }, vocab], dtype: o.actDtype,
     note: 'Only the last position is needed to sample the next token.',
   });
   op('@', [xNorm, head], logits,
-    `Matrix multiply, last position only: [1 × ${cfg.dModel}] @ [${cfg.dModel} × ${cfg.vocabSize}]. ${formatFlops(2 * cfg.dModel * cfg.vocabSize)} FLOPs.`,
+    `Matrix multiply, last position only: [1 × ${cfg.dModel}] @ [${cfg.dModel} × ${cfg.vocabSize}]. ${formatFlops(2 * cfg.dModel * cfg.vocabSize)} FLOPs.` +
+    (gpt2 ? ' Tied weights: lm_head.weight is transformer.wte.weight, read here in full, transposed.' : ''),
     2 * cfg.dModel * cfg.vocabSize);
 
   // Sampling floor (HF generate): not part of the model, it turns the logits into the next token. Vocab-wide strips,

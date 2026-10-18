@@ -107,6 +107,19 @@
 - In each layer, `@` produces Q and K before rotation; a `RoPE` op rotates them, fed by risers from the tables below.
   K is cached after rotation.
 
+## GPT-2
+
+- **Learned positions:** a `wpe` table (1,024 × d_model, parameters), looked up per position and added to the token
+  embedding on the embedding floor; that sum is layer 0's input, and the context cannot exceed 1,024 tokens.
+- **Multi-head attention:** as many KV heads as query heads, so the KV cache per token is large for the model's size
+  (GPT-2 XL: 300 KiB, more than Llama-3-8B's 128 KiB), and eager attention needs no `repeat_kv`.
+- **One fused projection** `c_attn` (d × 3d, a Conv1D: input dim first) yields Q, K and V as views of one tensor;
+  drawn as its three column blocks, each `@` reading a third of the weight.
+- **LayerNorm** (weight and bias) is `torch.nn.LayerNorm`, one fused kernel: one op even in Expanded mode.
+- **GELU MLP:** two matrices (d → 4d → d) with the tanh-approximated GELU between them; biases on every linear layer.
+- **Tied embeddings:** there is no `lm_head.weight`. The logits read `wte` on the embedding floor, drawn as a pipe from
+  the bottom floor up to the LM head; the table is counted once in the parameters and read twice per pass.
+
 ## Elementwise detail
 
 - *Compact*: RMSNorm and SwiGLU are single ops.
@@ -170,7 +183,7 @@
 
 ## Scope
 
-- Models: Llama-3-8B, Llama-3-70B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
+- Models: GPT-2, GPT-2 XL, Llama-3-8B, Llama-3-70B and Mixtral-8x7B (`src/model/config.ts`); everything is derived from the config.
   Llama-3-70B is 8B scaled up (twice the width, 80 layers) with the same 8 KV heads: weights grow 8.8×, the KV cache
   per token 2.5× (128 → 320 KiB).
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then

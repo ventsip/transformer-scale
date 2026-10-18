@@ -123,7 +123,7 @@ export function createControls(root: HTMLElement, s: Settings, o: ControlsOption
   };
   checkbox('showFlow', 'Show data flow on the focused floor');
   row('Attention', select('attention', [['fused', 'Fused (FlashAttention / SDPA)'], ['eager', 'Eager (one tensor per step)']]));
-  row('Elementwise ops', select('elementwise', [['compact', 'Compact (RMSNorm, SiLU ⊙ as one op)'], ['expanded', 'Expanded (every intermediate)']]));
+  row('Elementwise ops', select('elementwise', [['compact', 'Compact (norms, activations as one op)'], ['expanded', 'Expanded (every intermediate)']]));
   row('KV cache', select('kvCache', [['dynamic', 'Dynamic (grows with tokens)'], ['static', `Static (preallocated, ${formatInt(s.cacheCapacity)} slots)`]]));
 
   row('Thickness', select('thickness', [['bytes', 'Bytes per element'], ['elements', 'Uniform (elements only)']]));

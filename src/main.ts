@@ -40,6 +40,8 @@ const settings: Settings = {
   floorSpacing: 8000,
   playSpeed: '4',
 };
+// The opening model may have a shorter context than the default prompt (GPT-2: 1,024).
+settings.T = Math.min(settings.T, maxTokens(settings, cfg.maxContext));
 
 // Renderers.
 const app = document.getElementById('app')!;
@@ -308,6 +310,7 @@ function switchModel() {
 
 function describeSelection(sel: HeadSelection): string {
   const perGroup = cfg.nHeads / cfg.nKvHeads;
+  if (perGroup === 1) return `Head ${sel.group}, with its own K and V`;
   const first = sel.group * perGroup;
   const group = `KV group ${sel.group}`;
   return sel.head === null ? `${group} · Q heads ${first}–${first + perGroup - 1}` : `Q head ${sel.head} · ${group}`;
@@ -419,7 +422,9 @@ function headLine({ item, box, head }: Pick): string {
   const split = item.spec.heads;
   if (!split || head === null) return '';
   const band = box.sx * box.sz;
-  const what = split.perGroup === 1
+  const what = cfg.nHeads === cfg.nKvHeads
+    ? `Head ${head} of ${split.count} (multi-head attention: its own K and V)`
+    : split.perGroup === 1
     ? `KV head ${head} of ${split.count}, shared by Q heads ${head * (cfg.nHeads / cfg.nKvHeads)}–${(head + 1) * (cfg.nHeads / cfg.nKvHeads) - 1}`
     : `Q head ${head} of ${split.count} · KV group ${kvGroup(split, head)}`;
   return `<div class="tt-head">${what}: <b>${formatCount(band)}</b> elements · <b>${formatBytes(band * DTYPES[item.spec.dtype].bytes)}</b></div>`;
