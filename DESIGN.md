@@ -69,7 +69,8 @@
   marked; then illustrative g, u and a = SiLU(g) ⊙ u for one token, both ends of its d_ffn features, on one shared scale (outlines show
   each input), with a button to draw another token.
 - **RMSNorm** (opened from `RMSNorm`, or any step of the expanded chain; identified by output id, since labels like
-  `× weight` repeat elsewhere): one illustrative 64-feature token with two outlier features and a scale slider; x² with
+  `× weight` repeat elsewhere): one illustrative token of the full d_model, drawn by both ends, with two outlier
+  features (sized so they hold the same share of mean(x²) at any width) and a scale slider; x² with
   its mean, and 1/√(mean + ε); x / RMS(x) against ±1 lines with x as outlines, which stays put as the slider scales x
   (until mean(x²) nears ε); then the learned weight and the output.
 - **GELU** (GPT-2, opened from `GELU`): the tanh approximation ("gelu_new") against a dashed ReLU, its minimum

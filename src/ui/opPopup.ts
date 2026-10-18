@@ -1168,13 +1168,13 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
 // ---------------------------------------------------------------------------------------------
 // RMSNorm: x / √(mean(x²) + ε) · weight
 
-/** Features of the illustrative token vector, standing in for d_model. */
-const NORM_FEATURES = 64;
-const NORM_EPS = 1e-5;
 /**
  * Residual streams have a few outlier features far larger than the rest ("massive activations"): [index, value], a
- * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector).
+ * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector). The
+ * values are for a token of OUTLIER_WIDTH features; they grow with √(width / OUTLIER_WIDTH), so the outliers keep the
+ * same share of mean(x²) at any d_model.
  */
+const OUTLIER_WIDTH = 64;
 const OUTLIERS: [number, number][] = [[11, 14], [-24, -9]];
 const outlierIndex = (i: number, length: number) => (i < 0 ? length + i : i);
 /** Features of a full-length token shown as bars: the first NORM_HEAD and the last NORM_TAIL. */
@@ -1186,9 +1186,9 @@ const NORM_TAIL = 24;
  * per-feature scales for it (mostly 0.2–0.6, smaller on the outlier features). `normal` draws further values from the
  * same generator.
  */
-function illustrativeToken(length = NORM_FEATURES) {
+function illustrativeToken(length: number) {
   const normal = gaussian(rng(5));
-  const outliers = OUTLIERS.map(([i, v]) => [outlierIndex(i, length), v]);
+  const outliers = OUTLIERS.map(([i, v]) => [outlierIndex(i, length), v * Math.sqrt(length / OUTLIER_WIDTH)]);
   const base = Array.from({ length }, () => 0.8 * normal());
   for (const [i, v] of outliers) base[i] = v;
   const gamma = base.map(() => Math.abs(0.4 + 0.12 * normal()));
@@ -1196,19 +1196,38 @@ function illustrativeToken(length = NORM_FEATURES) {
   return { base, gamma, normal };
 }
 
-/** Column ticks and value format of the norm charts. */
-const NORM_TICKS = [0, 16, 32, 48, NORM_FEATURES - 1];
+/** Value format of the norm charts. */
 const normValue = (v: number) =>
   Math.abs(v) >= 1000 ? formatInt(Math.round(v)) : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
 /** The range of a chart of `vs`, including 0. */
 const extentWithZero = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max(0, ...vs) });
 
+/**
+ * Charts of a d_model vector by both ends: `shown` picks the columns of a vector, and `series` gives a chart's
+ * columns, range (including 0 and the columns `extra`) and hover text (from the feature index).
+ */
+function normCharts() {
+  const ends = bothEnds(model.dModel, NORM_HEAD, NORM_TAIL, [0, 16]);
+  const shown = (vs: number[]) => ends.values((k) => vs[k]);
+  const axis = { gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
+  const series = (vs: number[], text: (k: number) => string, extra: number[] = []) => {
+    const values = shown(vs);
+    return {
+      values, ...axis, ...extentWithZero([...values, ...extra]),
+      describe: (i: number) => (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(ends.index(i))}`),
+    };
+  };
+  return { shown, series };
+}
+
 function rmsNormViz(body: HTMLElement, focus: NormStage): void {
-  const { base, gamma } = illustrativeToken();
+  // The whole d_model vector; the charts show both ends of it, and the statistics are over all of it.
+  const { base, gamma } = illustrativeToken(model.dModel);
+  const eps = model.normEps;
 
   const sInput = stageSection(body, focus === 'input', 'x: one token',
-    `The residual stream of one token, upcast to fp32. Illustrative: ${NORM_FEATURES} features standing in for d_model, ` +
-    'including two outliers, as real residual streams have.');
+    `The residual stream of one token, upcast to fp32. Illustrative values for both ends of its ${formatInt(model.dModel)} ` +
+    'features (d_model), including two outliers, as real residual streams have; the statistics are over all of them.');
   const scale = el('input', { type: 'range', min: '-2', max: '2', step: '0.01', value: '0' });
   const scaleShown = el('b');
   const scaleRow = el('label', { className: 'op-popup-control' });
@@ -1235,49 +1254,39 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   const cOut = barChart('x / RMS(x) · weight', 'outlines: x / RMS(x)');
   sWeight.append(cGamma.root, cOut.root);
 
-  const ticks = NORM_TICKS;
-  const tickLabel = String;
   const f = normValue;
-  const extent = extentWithZero;
+  const { shown, series } = normCharts();
 
   function update() {
     const s = 10 ** Number(scale.value);
     scaleShown.textContent = `×${s < 1 ? s.toPrecision(2) : s.toFixed(s < 10 ? 2 : 1)}`;
     const x = base.map((v) => v * s);
     const sq = x.map((v) => v * v);
-    const ms = sq.reduce((a, b) => a + b, 0) / NORM_FEATURES;
-    const r = 1 / Math.sqrt(ms + NORM_EPS);
+    const ms = sq.reduce((a, b) => a + b, 0) / x.length;
+    const r = 1 / Math.sqrt(ms + eps);
     const n = x.map((v) => v * r);
     const out = n.map((v, i) => v * gamma[i]);
     const rmsOf = (vs: number[]) => Math.sqrt(vs.reduce((a, v) => a + v * v, 0) / vs.length);
-    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[outlierIndex(i, NORM_FEATURES)], 0) / (ms * NORM_FEATURES);
+    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[outlierIndex(i, x.length)], 0) / (ms * x.length);
 
-    cX.draw({ values: x, ...extent(x), ticks, tickLabel, describe: (i) => `feature ${i} · x = ${f(x[i])}` });
+    cX.draw(series(x, (k) => `x = ${f(x[k])}`));
     fX.innerHTML = `RMS(x) = <b>${f(Math.sqrt(ms))}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
 
-    cSq.draw({
-      values: sq, ...extent(sq), ticks, tickLabel, refs: [{ value: ms, label: 'mean' }],
-      describe: (i) => `feature ${i} · x² = ${f(sq[i])}`,
-    });
+    cSq.draw({ ...series(sq, (k) => `x² = ${f(sq[k])}`), refs: [{ value: ms, label: 'mean' }] });
     fMean.innerHTML =
-      `mean(x²) = <b>${f(ms)}</b>, ε = ${NORM_EPS}, so 1/√(mean + ε) = <b>${f(r)}</b>. ` +
+      `mean(x²) = <b>${f(ms)}</b>, ε = ${eps}, so 1/√(mean + ε) = <b>${f(r)}</b>. ` +
       `The two outliers contribute <b>${(100 * outlierShare).toFixed(0)}%</b> of the mean: they set the scale for every other feature.`;
 
-    const nExt = extent([...n, ...x, 1, -1]);
     cNorm.draw({
-      values: n, ghost: x, ...nExt, ticks, tickLabel, refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
-      describe: (i) => `feature ${i} · ${f(x[i])} × ${f(r)} = ${f(n[i])}`,
+      ...series(n, (k) => `${f(x[k])} × ${f(r)} = ${f(n[k])}`, [...shown(x), 1, -1]), ghost: shown(x),
+      refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
     });
     fNorm.innerHTML =
       `RMS after: <b>${rmsOf(n).toFixed(3)}</b>. Move the scale slider: the outlines follow x, the bars stay the same, ` +
       `because x and RMS(x) scale together. Only when mean(x²) gets near ε (scale ×0.01) does the RMS drop below 1.`;
 
-    cGamma.draw({ values: gamma, ...extent(gamma), ticks, tickLabel, describe: (i) => `feature ${i} · weight = ${f(gamma[i])}` });
-    const oExt = extent([...out, ...n]);
-    cOut.draw({
-      values: out, ghost: n, ...oExt, ticks, tickLabel,
-      describe: (i) => `feature ${i} · ${f(n[i])} × ${f(gamma[i])} = ${f(out[i])}`,
-    });
+    cGamma.draw(series(gamma, (k) => `weight = ${f(gamma[k])}`));
+    cOut.draw({ ...series(out, (k) => `${f(n[k])} × ${f(gamma[k])} = ${f(out[k])}`, shown(n)), ghost: shown(n) });
   }
   scale.addEventListener('input', update);
   update();
@@ -1295,17 +1304,7 @@ function layerNormViz(body: HTMLElement): void {
   const eps = model.normEps;
   const mean = (vs: number[]) => vs.reduce((a, b) => a + b, 0) / vs.length;
   const f = normValue;
-  const ends = bothEnds(model.dModel, NORM_HEAD, NORM_TAIL, [0, 16]);
-  const shown = (vs: number[]) => ends.values((k) => vs[k]);
-  const axis = { gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
-  /** Chart columns of vs with their range (including 0 and the columns extra), and the hover text of each column. */
-  const series = (vs: number[], text: (k: number) => string, extra: number[] = []) => {
-    const values = shown(vs);
-    return {
-      values, ...axis, ...extentWithZero([...values, ...extra]),
-      describe: (i: number) => (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(ends.index(i))}`),
-    };
-  };
+  const { shown, series } = normCharts();
 
   const sInput = stageSection(body, true, 'x: one token',
     `The residual stream of one token. Illustrative values for both ends of its ${formatInt(model.dModel)} features (d_model), ` +
