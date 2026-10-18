@@ -1,5 +1,5 @@
 import type { ModelConfig } from './config';
-import { byteCount, elementCount, type Model, type TensorSpec } from './tensors';
+import { byteCount, elementCount, layerFloor, type Model, type TensorSpec } from './tensors';
 
 export interface Stats {
   params: number;
@@ -38,8 +38,8 @@ export function summarize({ tensors, ops }: Model, cfg: ModelConfig): Stats {
     activeParams: params - expertParams * (1 - activeShare),
     kvElements: sum(isCache, elementCount),
     kvBytes: sum(isCache, byteCount),
-    layerActBytes: sum((s) => s.floor === 1 && s.kind === 'activation', byteCount),
-    scoresBytes: sum((s) => s.floor === 1 && s.kind === 'scores', byteCount),
+    layerActBytes: sum((s) => s.floor === layerFloor(0) && s.kind === 'activation', byteCount),
+    scoresBytes: sum((s) => s.floor === layerFloor(0) && s.kind === 'scores', byteCount),
     flops: ops.reduce((acc, op) => acc + (op.flops ?? 0), 0),
     bytesRead,
   };

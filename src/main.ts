@@ -7,7 +7,7 @@ import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
 import {
-  buildModel, byteCount, elementCount, floorCount, floorName, isTransient, kvGroup, selectionFor,
+  buildModel, byteCount, elementCount, floorCount, floorName, isLayerFloor, isTransient, kvGroup, selectionFor,
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter, type Edge } from './scene/flowScene';
@@ -138,7 +138,7 @@ function rebuild() {
   const floorOf = new Map(specs.map((s) => [s.id, s.floor]));
   linked = settings.showFlow ? linkedTensors(model.ops, (id) => floorOf.get(id)!, settings.focusFloor) : new Set();
   // The generation loop: the sampled token feeds the next step's input. Both ends stay visible.
-  const loop: [string, string] = [`${cfg.nLayers + 2}:next_token`, '0:input_ids'];
+  const loop: [string, string] = [model.loop.output, model.loop.input];
   if (settings.showFlow) loop.forEach((id) => linked.add(id));
   tensors.update(placed.filter((p) => isVisible(p.spec)), settings.focusFloor, selection, expertSelection);
   flow.update(model.ops, placed, settings.showFlow ? settings.focusFloor : null, selection, loop);
@@ -398,7 +398,7 @@ function share(s: TensorSpec): string {
   const pct = (x: number, of: number) => formatPercent(x / of);
   if (s.kind === 'weight') return `${pct(elementCount(s), stats.params)} of all parameters`;
   if (s.kind === 'kv') return `${pct(b, stats.kvBytes)} of the KV cache`;
-  if (s.kind === 'activation' && s.floor >= 1 && s.floor <= cfg.nLayers) return `${pct(b, stats.layerActBytes)} of this layer's transient activations`;
+  if (s.kind === 'activation' && isLayerFloor(cfg, s.floor)) return `${pct(b, stats.layerActBytes)} of this layer's transient activations`;
   return '';
 }
 

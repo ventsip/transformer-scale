@@ -1,5 +1,5 @@
 import { DTYPES } from './model/dtypes';
-import type { Role, TensorSpec } from './model/tensors';
+import { ATTENTION_SECTION, FIRST_EXPERT_SECTION, type Role, type TensorSpec } from './model/tensors';
 
 /**
  * Floor plan: 1 world unit = 1 element along X and Z.
@@ -234,7 +234,7 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
         }
         x0 += width + STATION_GAP;
       }
-      const shift = section === 0 ? 0 : behind - (section <= 2 ? PART_GAP : SECTION_GAP) - maxZ;
+      const shift = section === ATTENTION_SECTION ? 0 : behind - (section <= FIRST_EXPERT_SECTION ? PART_GAP : SECTION_GAP) - maxZ;
       for (const p of local) {
         p.busZ = shift;
         for (const b of p.boxes) b.cz += shift;

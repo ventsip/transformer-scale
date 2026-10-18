@@ -3,7 +3,7 @@ import { LLAMA_3_8B, type ModelConfig } from '../model/config';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
 import { gaussian, rng } from '../random';
-import type { Mode, OpSpec } from '../model/tensors';
+import { floorLayer, type Mode, type OpSpec, type OpViz, type VizStage } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
 let model: ModelConfig = LLAMA_3_8B;
@@ -15,102 +15,30 @@ export function setPopupContext(cfg: ModelConfig, current: { mode: Mode; T: numb
   pass = { mode: current.mode, T: current.T, weightDtype: current.weightDtype };
 }
 
-/** The stages of the sampling panel, in pipeline order. */
-type Stage = 'logits' | 'temperature' | 'filter' | 'softmax' | 'sample';
+type Stage = VizStage<'sampling'>;
+type GluStage = VizStage<'swiglu'>;
+type MoeStage = VizStage<'moe'>;
+type AttnStage = VizStage<'attention'>;
+type RopeStage = VizStage<'rope'>;
+type NormStage = VizStage<'rmsnorm'>;
 
-/** Which sampling stage an op belongs to, from the tensor it produces; null for ops without a view. */
-function samplingStage(op: OpSpec): Stage | null {
-  const out = op.output.split(':')[1];
-  if (out === 'logits_fp32') return 'logits';
-  if (out === 'scaled') return 'temperature';
-  if (out === 'filtered') return 'filter';
-  if (out === 'probs' && op.label === 'softmax') return 'softmax';
-  if (out === 'next_token') return 'sample';
-  return null;
-}
-
-/** The stages of the SwiGLU panel. */
-type GluStage = 'silu' | 'gate';
-
-/** Which SwiGLU stage an op belongs to: compact `SiLU ⊙`, or expanded `SiLU` and `⊙`. */
-function swigluStage(op: OpSpec): GluStage | null {
-  if (op.label === 'SiLU ⊙' || op.label === 'SiLU') return 'silu';
-  if (op.label === '⊙') return 'gate';
-  return null;
-}
-
-/** The stages of the mixture-of-experts panel. */
-type MoeStage = 'router' | 'dispatch' | 'combine';
-
-/** MoE ops, by output: the router's tensors, each expert's gathered rows, and the weighted sum back into m. */
-function moeStage(op: OpSpec): MoeStage | null {
-  const out = op.output.split(':')[1];
-  if (['router_logits', 'router_probs', 'selected_experts', 'routing_weights'].includes(out)) return 'router';
-  if (/^e\d+\.x$/.test(out)) return 'dispatch';
-  if (/^e\d+\.ys$/.test(out) || (out === 'm' && op.label.includes('index_add'))) return 'combine';
-  return null;
-}
-
-/** The stages of the attention panel. */
-type AttnStage = 'scores' | 'softmax' | 'output';
-
-/**
- * Attention ops, by output: eager repeat_kv copies, the causal mask, raw and masked scores, softmax and its cast
- * (`probs` only on layer floors: the LM head's sampling probabilities share the id), and attn (fused, or eager · V).
- */
-function attnStage(op: OpSpec): AttnStage | null {
-  const out = op.output.split(':')[1];
-  if (['k_rep', 'v_rep', 'causal_mask', 'scores', 'scores_masked'].includes(out)) return 'scores';
-  if (out === 'probs_fp32' || (out === 'probs' && op.floor >= 1 && op.floor <= model.nLayers)) return 'softmax';
-  if (out === 'attn') return op.label === 'attention' ? 'scores' : 'output';
-  return null;
-}
-
-/** The stages of the RoPE panel. */
-type RopeStage = 'freq' | 'rotate';
-
-/** The cos / sin tables on the embedding floor show the frequencies; the RoPE ops in each layer, the rotation. */
-function ropeStage(op: OpSpec): RopeStage | null {
-  if (op.label === 'RoPE') return 'rotate';
-  const out = op.output.split(':')[1];
-  return out === 'cos' || out === 'sin' ? 'freq' : null;
-}
-
-/** The stages of the RMSNorm panel. */
-type NormStage = 'input' | 'mean' | 'normalize' | 'weight';
-
-/**
- * Which RMSNorm stage an op belongs to, from its output: x_norm or h_norm (compact, or the final × weight), or one of
- * the expanded intermediates x_norm.fp32, .sq, .mean, .rsqrt, .n32, .n. Labels alone are ambiguous (`× weight`, `to fp32`).
- */
-function normStage(op: OpSpec): NormStage | null {
-  const m = /^[xh]_norm(?:\.(\w+))?$/.exec(op.output.split(':')[1]);
-  if (!m) return null;
-  const step = m[1];
-  // GPT-2's LayerNorm writes x_norm too, but this panel is RMSNorm's.
-  if (op.label === 'LayerNorm') return null;
-  if (step === undefined) return op.label === 'RMSNorm' ? 'input' : 'weight';
-  if (step === 'fp32') return 'input';
-  if (step === 'sq' || step === 'mean' || step === 'rsqrt') return 'mean';
-  return 'normalize';
-}
+/** Each popup panel: its title, and how to fill the popup body for an op tagged with it (see OpSpec.viz). */
+const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLElement, viz: Extract<OpViz, { panel: P }>, op: OpSpec) => void } } = {
+  lookup: { title: 'Embedding lookup: token ids select rows', render: (body) => lookupViz(body) },
+  sampling: { title: 'Sampling: from logits to the next token', render: (body, viz) => samplingViz(body, viz.stage) },
+  moe: { title: 'Mixture of experts: route, dispatch, combine', render: (body, viz, op) => moeViz(body, viz.stage, floorLayer(op.floor)) },
+  attention: { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body, viz) => attentionViz(body, viz.stage) },
+  rope: { title: 'RoPE: rotary position embedding', render: (body, viz) => ropeViz(body, viz.stage) },
+  rmsnorm: { title: 'RMSNorm: x / RMS(x) · weight', render: (body, viz) => rmsNormViz(body, viz.stage) },
+  swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage) },
+};
 
 /** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
-  if (op.label === 'lookup') return { title: 'Embedding lookup: token ids select rows', render: lookupViz };
-  const sampling = samplingStage(op);
-  if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
-  const moe = moeStage(op);
-  if (moe) return { title: 'Mixture of experts: route, dispatch, combine', render: (body) => moeViz(body, moe, op.floor - 1) };
-  const attn = attnStage(op);
-  if (attn) return { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body) => attentionViz(body, attn) };
-  const rope = ropeStage(op);
-  if (rope) return { title: 'RoPE: rotary position embedding', render: (body) => ropeViz(body, rope) };
-  const norm = normStage(op);
-  if (norm) return { title: 'RMSNorm: x / RMS(x) · weight', render: (body) => rmsNormViz(body, norm) };
-  const glu = swigluStage(op);
-  if (glu) return { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body) => swigluViz(body, glu) };
-  return null;
+  const viz = op.viz;
+  if (!viz) return null;
+  const panel = PANELS[viz.panel] as { title: string; render: (body: HTMLElement, viz: OpViz, op: OpSpec) => void };
+  return { title: panel.title, render: (body) => panel.render(body, viz, op) };
 }
 
 export const hasViz = (op: OpSpec) => vizFor(op) !== null;

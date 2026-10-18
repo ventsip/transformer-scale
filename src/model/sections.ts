@@ -1,5 +1,5 @@
 import type { ModelConfig } from './config';
-import { byteCount, elementCount, isTransient, type Model, type TensorSpec } from './tensors';
+import { ATTENTION_SECTION, FIRST_EXPERT_SECTION, MLP_SECTION, byteCount, elementCount, isLayerFloor, isTransient, type Model, type TensorSpec } from './tensors';
 
 export type PartKind = 'attention' | 'mlp' | 'router' | 'experts' | 'expert';
 
@@ -30,7 +30,7 @@ export interface Part {
  * up) and each expert on its own. Other floors have no parts.
  */
 export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[] {
-  if (floor < 1 || floor > cfg.nLayers) return [];
+  if (!isLayerFloor(cfg, floor)) return [];
   const onFloor = model.tensors.filter((s) => s.floor === floor);
   const byId = new Map(model.tensors.map((s) => [s.id, s]));
   const ops = model.ops.filter((op) => op.floor === floor);
@@ -57,10 +57,10 @@ export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[
     };
   };
 
-  const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === 0))];
-  if (!cfg.moe) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === 1))];
-  parts.push(part('router', 'Router', 'router', onFloor.filter((s) => s.section === 1)));
-  parts.push(part('experts', 'Experts', 'experts', onFloor.filter((s) => s.section >= 2)));
+  const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION))];
+  if (!cfg.moe) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
+  parts.push(part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION)));
+  parts.push(part('experts', 'Experts', 'experts', onFloor.filter((s) => s.section >= FIRST_EXPERT_SECTION)));
   for (let e = 0; e < cfg.moe.nExperts; e++) {
     parts.push(part(`expert ${e}`, `E${e}`, 'expert', onFloor.filter((s) => s.expert === e), e));
   }
