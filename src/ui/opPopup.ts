@@ -1170,11 +1170,9 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
 
 /**
  * Residual streams have a few outlier features far larger than the rest ("massive activations"): [index, value], a
- * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector). The
- * values are for a token of OUTLIER_WIDTH features; they grow with √(width / OUTLIER_WIDTH), so the outliers keep the
- * same share of mean(x²) at any d_model.
+ * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector). Their
+ * size is fixed, so the ordinary features stay readable next to them at any d_model.
  */
-const OUTLIER_WIDTH = 64;
 const OUTLIERS: [number, number][] = [[11, 14], [-24, -9]];
 const outlierIndex = (i: number, length: number) => (i < 0 ? length + i : i);
 /** Features of a full-length token shown as bars: the first NORM_HEAD and the last NORM_TAIL. */
@@ -1188,7 +1186,7 @@ const NORM_TAIL = 24;
  */
 function illustrativeToken(length: number) {
   const normal = gaussian(rng(5));
-  const outliers = OUTLIERS.map(([i, v]) => [outlierIndex(i, length), v * Math.sqrt(length / OUTLIER_WIDTH)]);
+  const outliers = OUTLIERS.map(([i, v]) => [outlierIndex(i, length), v]);
   const base = Array.from({ length }, () => 0.8 * normal());
   for (const [i, v] of outliers) base[i] = v;
   const gamma = base.map(() => Math.abs(0.4 + 0.12 * normal()));
@@ -1267,7 +1265,11 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
     const n = x.map((v) => v * r);
     const out = n.map((v, i) => v * gamma[i]);
     const rmsOf = (vs: number[]) => Math.sqrt(vs.reduce((a, v) => a + v * v, 0) / vs.length);
-    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[outlierIndex(i, x.length)], 0) / (ms * x.length);
+    const outlierSq = OUTLIERS.reduce((a, [i]) => a + sq[outlierIndex(i, x.length)], 0);
+    const outlierShare = outlierSq / (ms * x.length);
+    // How much smaller every other feature comes out than it would without the outliers.
+    const msWithout = (ms * x.length - outlierSq) / x.length;
+    const shrink = 1 - Math.sqrt((msWithout + eps) / (ms + eps));
 
     cX.draw(series(x, (k) => `x = ${f(x[k])}`));
     fX.innerHTML = `RMS(x) = <b>${f(Math.sqrt(ms))}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
@@ -1275,7 +1277,8 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
     cSq.draw({ ...series(sq, (k) => `x² = ${f(sq[k])}`), refs: [{ value: ms, label: 'mean' }] });
     fMean.innerHTML =
       `mean(x²) = <b>${f(ms)}</b>, ε = ${eps}, so 1/√(mean + ε) = <b>${f(r)}</b>. ` +
-      `The two outliers contribute <b>${(100 * outlierShare).toFixed(0)}%</b> of the mean: they set the scale for every other feature.`;
+      `The two outliers contribute <b>${(100 * outlierShare).toFixed(0)}%</b> of the mean, from 2 of ${formatInt(x.length)} features: ` +
+      `every other feature comes out <b>${(100 * shrink).toFixed(0)}%</b> smaller than it would without them.`;
 
     cNorm.draw({
       ...series(n, (k) => `${f(x[k])} × ${f(r)} = ${f(n[k])}`, [...shown(x), 1, -1]), ghost: shown(x),
