@@ -201,7 +201,7 @@
   ramp from the fast ones that stay (`src/model/rope.ts`, used by the inv_freq note and the RoPE popup), and scores are
   scaled up by mscale² ≈ 1.59.
 - **Experts.** Layer 0 keeps a dense MLP (10,944 wide). The others have 64 routed SwiGLU experts, 1,408 wide, top 6,
-  in a 12-wide grid, plus 2 shared experts that every token runs through, which HF runs as one 2,816-wide MLP: drawn
+  in an 8 × 8 grid (the grid width is in the config), plus 2 shared experts that every token runs through, which HF runs as one 2,816-wide MLP: drawn
   in the router's section with a tray of their own, added to the routed sum. The top-6 weights are not renormalized
   (norm_topk_prob false), so the routed experts together count for less than the shared ones. Module names, widths and
   renormalization come from the config, so Mixtral and DeepSeek share one builder.

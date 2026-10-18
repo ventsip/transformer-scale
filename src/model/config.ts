@@ -43,6 +43,8 @@ export interface MoeConfig {
   denseLayers: number;
   /** Whether the top-k routing weights are divided by their sum (norm_topk_prob; Mixtral always does). */
   renormalize: boolean;
+  /** Experts per row of the grid they are drawn in. */
+  gridColumns: number;
   /** HF module names: the MoE block, and each expert's gate, up and down projections. */
   names: { block: string; gate: string; up: string; down: string };
 }
@@ -131,7 +133,7 @@ export const MIXTRAL_8X7B: ModelConfig = {
   normEps: 1e-5,
   bos: { text: '<s>', id: 1 },
   moe: {
-    nExperts: 8, topK: 2, expertFfn: 14336, denseLayers: 0, renormalize: true,
+    nExperts: 8, topK: 2, expertFfn: 14336, denseLayers: 0, renormalize: true, gridColumns: 4,
     names: { block: 'block_sparse_moe', gate: 'w1', up: 'w3', down: 'w2' },
   },
 };
@@ -154,7 +156,7 @@ export const DEEPSEEK_V2_LITE: ModelConfig = {
   normEps: 1e-6,
   bos: { text: '<｜begin▁of▁sentence｜>', id: 100000 },
   moe: {
-    nExperts: 64, topK: 6, expertFfn: 1408, sharedFfn: 2 * 1408, denseLayers: 1, renormalize: false,
+    nExperts: 64, topK: 6, expertFfn: 1408, sharedFfn: 2 * 1408, denseLayers: 1, renormalize: false, gridColumns: 8,
     names: { block: 'mlp', gate: 'gate_proj', up: 'up_proj', down: 'down_proj' },
   },
   mla: { kvLoraRank: 512, qkNopeDim: 128, qkRopeDim: 64, vDim: 128 },

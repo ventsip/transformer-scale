@@ -432,7 +432,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
    * activations. Returns the tokens each expert receives.
    */
   const moe = (l: number, h: string, hNorm: string): number[] => {
-    const { nExperts, topK, expertFfn, sharedFfn, renormalize, names } = cfg.moe!;
+    const { nExperts, topK, expertFfn, sharedFfn, renormalize, gridColumns: cols, names } = cfg.moe!;
     const experts: Dim = { name: 'experts', size: nExperts };
     const picks: Dim = { name: `top-${topK}`, size: topK };
     const ffn: Dim = { name: 'd_ffn', size: expertFfn };
@@ -504,7 +504,6 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const expanded = o.elementwise === 'expanded';
     const stackedRows = expanded ? 4 : 3;
     const reserveFront = stackedRows * Math.max(...counts) + (stackedRows - 1) * STACK_GAP;
-    const cols = Math.ceil(Math.sqrt(2 * nExperts));
     const outputs: string[] = [];
     for (let e = 0; e < nExperts; e++) {
       if (e % cols === 0) nextSection();
