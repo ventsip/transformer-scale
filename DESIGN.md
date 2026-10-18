@@ -49,6 +49,10 @@
   `× weight` repeat elsewhere): one illustrative 64-feature token with two outlier features and a scale slider; x² with
   its mean, and 1/√(mean + ε); x / RMS(x) against ±1 lines with x as outlines, which stays put as the slider scales x
   (until mean(x²) nears ε); then the learned weight and the output.
+- **RoPE** (opened from `cos(pos·θ)` / `sin(pos·θ)` on the embedding floor, or `RoPE` in any layer; computed from the
+  model's RoPE base, head_dim and context): the wavelength of each of the 64 pairs on a log axis against the context
+  length; dials for 8 pairs rotating with a position slider; and the score of identical q and k against their distance
+  m − n (log axis), which shows that RoPE makes scores depend on distance only, decaying with ripples.
 
 ## Attention heads
 

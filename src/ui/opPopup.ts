@@ -1,4 +1,12 @@
+import { LLAMA_3_8B, type ModelConfig } from '../model/config';
 import type { OpSpec } from '../model/tensors';
+
+/** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
+let model: ModelConfig = LLAMA_3_8B;
+
+export function setPopupModel(cfg: ModelConfig): void {
+  model = cfg;
+}
 
 /** The stages of the sampling panel, in pipeline order. */
 type Stage = 'logits' | 'temperature' | 'filter' | 'softmax' | 'sample';
@@ -24,6 +32,16 @@ function swigluStage(op: OpSpec): GluStage | null {
   return null;
 }
 
+/** The stages of the RoPE panel. */
+type RopeStage = 'freq' | 'rotate';
+
+/** The cos / sin tables on the embedding floor show the frequencies; the RoPE ops in each layer, the rotation. */
+function ropeStage(op: OpSpec): RopeStage | null {
+  if (op.label === 'RoPE') return 'rotate';
+  const out = op.output.split(':')[1];
+  return out === 'cos' || out === 'sin' ? 'freq' : null;
+}
+
 /** The stages of the RMSNorm panel. */
 type NormStage = 'input' | 'mean' | 'normalize' | 'weight';
 
@@ -45,6 +63,8 @@ function normStage(op: OpSpec): NormStage | null {
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
   const sampling = samplingStage(op);
   if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
+  const rope = ropeStage(op);
+  if (rope) return { title: 'RoPE: rotary position embedding', render: (body) => ropeViz(body, rope) };
   const norm = normStage(op);
   if (norm) return { title: 'RMSNorm: x / RMS(x) · weight', render: (body) => rmsNormViz(body, norm) };
   const glu = swigluStage(op);
@@ -100,12 +120,6 @@ function stageSection(body: HTMLElement, focused: boolean, title: string, text: 
 // ---------------------------------------------------------------------------------------------
 // Sampling: logits → ÷ temperature → top-k / top-p → softmax → sample
 
-/** Vocabulary size of the current model. */
-let VOCAB = 128256;
-
-export function setVocabSize(n: number): void {
-  VOCAB = n;
-}
 const SHOWN = 40;
 
 /** Deterministic pseudo-random numbers, so the illustration is the same every time. */
@@ -124,8 +138,8 @@ function rng(seed: number) {
 function illustrativeLogits(): Float64Array {
   const rand = rng(7);
   const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
-  const logits = new Float64Array(VOCAB);
-  for (let r = 0; r < VOCAB; r++) {
+  const logits = new Float64Array(model.vocabSize);
+  for (let r = 0; r < model.vocabSize; r++) {
     logits[r] = r < 60 ? 18 - 14 * Math.log(1 + r / 15) + 0.6 * normal() : -8 + 2 * normal();
   }
   return logits.sort().reverse();
@@ -169,7 +183,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   };
 
   // 1. Logits.
-  const sLogits = section('logits', 'logits (fp32)', `The LM head scores every token in the vocabulary. Illustrative values; the top ${SHOWN} of ${VOCAB.toLocaleString('en-US')} shown, by rank.`);
+  const sLogits = section('logits', 'logits (fp32)', `The LM head scores every token in the vocabulary. Illustrative values; the top ${SHOWN} of ${model.vocabSize.toLocaleString('en-US')} shown, by rank.`);
   const cLogits = barChart();
   sLogits.append(cLogits.root);
 
@@ -241,7 +255,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
     });
 
     filterFacts.innerHTML =
-      `Top-k keeps <b>${int(afterK)}</b> of ${int(VOCAB)} tokens; top-p then keeps <b>${int(kept)}</b>` +
+      `Top-k keeps <b>${int(afterK)}</b> of ${int(model.vocabSize)} tokens; top-p then keeps <b>${int(kept)}</b>` +
       (kept > SHOWN ? ` (only the first ${SHOWN} are shown).` : '.');
     let cum = 0;
     let for90 = 0;
@@ -345,64 +359,106 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
 
 /** SiLU against ReLU over x ∈ [−6, 6], with a hover crosshair and the minimum marked. */
 function siluChart(): HTMLElement {
+  const minY = silu(SILU_MIN_X);
+  return lineChart({
+    caption: '<span class="op-legend"><i class="swatch-line"></i>SiLU(x)</span>' +
+      '<span class="op-legend"><i class="swatch-ref"></i>ReLU(x) = max(0, x), for reference</span>',
+    label: 'SiLU and ReLU from x = −6 to 6',
+    x: { lo: -6, hi: 6, ticks: [-6, -4, -2, 0, 2, 4, 6], tickLabel: String },
+    y: { lo: -1, hi: 6, ticks: [-1, 0, 1, 2, 3, 4, 5, 6] },
+    f: silu,
+    ref: (x) => Math.max(0, x),
+    marker: { x: SILU_MIN_X, label: `min ${minY.toFixed(3)}` },
+    describe: (x) => `x = ${x.toFixed(2)} · σ(x) = ${sigmoid(x).toFixed(3)} · SiLU = ${silu(x).toFixed(3)} · ReLU = ${Math.max(0, x).toFixed(2)}`,
+  });
+}
+
+interface LineChartOptions {
+  /** Legend, as HTML. */
+  caption: string;
+  label: string;
+  /** With `log`, x is spaced logarithmically (lo must be positive). */
+  x: { lo: number; hi: number; log?: boolean; ticks: number[]; tickLabel: (x: number) => string };
+  y: { lo: number; hi: number; ticks: number[] };
+  f: (x: number) => number;
+  /** A dashed reference curve. */
+  ref?: (x: number) => number;
+  /** A labeled point on f. */
+  marker?: { x: number; label: string };
+  /** Snaps the hovered x, e.g. to whole tokens. */
+  snap?: (x: number) => number;
+  describe: (x: number) => string;
+  /** Points along the curve; more for fast oscillations. */
+  samples?: number;
+}
+
+/** A single-function line chart in SVG, with an optional dashed reference, a marked point and a hover crosshair. */
+function lineChart(o: LineChartOptions): HTMLElement {
   const W = 560;
   const H = 220;
   const pad = { l: 40, r: 12, t: 10, b: 22 };
-  const [xLo, xHi, yLo, yHi] = [-6, 6, -1, 6];
-  const px = (x: number) => pad.l + ((x - xLo) / (xHi - xLo)) * (W - pad.l - pad.r);
-  const py = (y: number) => pad.t + ((yHi - y) / (yHi - yLo)) * (H - pad.t - pad.b);
+  const t = (x: number) => (o.x.log ? Math.log(x) : x);
+  const [tLo, tHi] = [t(o.x.lo), t(o.x.hi)];
+  const px = (x: number) => pad.l + ((t(x) - tLo) / (tHi - tLo)) * (W - pad.l - pad.r);
+  const py = (y: number) => pad.t + ((o.y.hi - y) / (o.y.hi - o.y.lo)) * (H - pad.t - pad.b);
+  const fromPx = (sx: number) => {
+    const u = tLo + ((sx - pad.l) / (W - pad.l - pad.r)) * (tHi - tLo);
+    return Math.max(o.x.lo, Math.min(o.x.hi, o.x.log ? Math.exp(u) : u));
+  };
   const root = el('figure', { className: 'op-chart' });
   const caption = el('figcaption');
-  caption.innerHTML = '<span class="op-legend"><i class="swatch-line"></i>SiLU(x)</span>' +
-    '<span class="op-legend"><i class="swatch-ref"></i>ReLU(x) = max(0, x), for reference</span>';
-  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'SiLU and ReLU from x = −6 to 6' });
+  caption.innerHTML = o.caption;
+  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.label });
   const tip = el('div', { className: 'op-chart-tip' });
   tip.hidden = true;
   root.append(caption, plot, tip);
 
-  for (let y = yLo; y <= yHi; y++) {
+  for (const y of o.y.ticks) {
     plot.append(svg('line', { x1: pad.l, x2: W - pad.r, y1: py(y), y2: py(y), class: y === 0 ? 'axis' : 'grid' }));
     const label = svg('text', { x: pad.l - 6, y: py(y) + 3, class: 'tick', 'text-anchor': 'end' });
     label.textContent = String(y);
     plot.append(label);
   }
-  for (let x = xLo; x <= xHi; x += 2) {
-    if (x === 0) plot.append(svg('line', { x1: px(0), x2: px(0), y1: py(yLo), y2: py(yHi), class: 'axis' }));
+  for (const x of o.x.ticks) {
+    if (x === 0) plot.append(svg('line', { x1: px(0), x2: px(0), y1: py(o.y.lo), y2: py(o.y.hi), class: 'axis' }));
     const label = svg('text', { x: px(x), y: H - 6, class: 'tick', 'text-anchor': 'middle' });
-    label.textContent = String(x);
+    label.textContent = o.x.tickLabel(x);
     plot.append(label);
   }
+  const samples = o.samples ?? 240;
   const path = (f: (x: number) => number) => {
     let d = '';
-    for (let i = 0; i <= 240; i++) {
-      const x = xLo + ((xHi - xLo) * i) / 240;
+    for (let i = 0; i <= samples; i++) {
+      const x = fromPx(pad.l + ((W - pad.l - pad.r) * i) / samples);
       d += `${i ? 'L' : 'M'}${px(x).toFixed(1)},${py(f(x)).toFixed(1)}`;
     }
     return d;
   };
-  plot.append(svg('path', { d: path((x) => Math.max(0, x)), class: 'ref' }));
-  plot.append(svg('path', { d: path(silu), class: 'line' }));
-  const minY = silu(SILU_MIN_X);
-  plot.append(svg('circle', { cx: px(SILU_MIN_X), cy: py(minY), r: 4, class: 'marker' }));
-  const minLabel = svg('text', { x: px(SILU_MIN_X), y: py(minY) + 16, class: 'tick', 'text-anchor': 'middle' });
-  minLabel.textContent = `min ${minY.toFixed(3)}`;
-  plot.append(minLabel);
+  if (o.ref) plot.append(svg('path', { d: path(o.ref), class: 'ref' }));
+  plot.append(svg('path', { d: path(o.f), class: 'line' }));
+  if (o.marker) {
+    const my = o.f(o.marker.x);
+    plot.append(svg('circle', { cx: px(o.marker.x), cy: py(my), r: 4, class: 'marker' }));
+    const label = svg('text', { x: px(o.marker.x), y: py(my) + 16, class: 'tick', 'text-anchor': 'middle' });
+    label.textContent = o.marker.label;
+    plot.append(label);
+  }
 
   // Crosshair: follows the pointer along x.
-  const cross = svg('line', { y1: py(yHi), y2: py(yLo), class: 'crosshair', visibility: 'hidden' });
+  const cross = svg('line', { y1: py(o.y.hi), y2: py(o.y.lo), class: 'crosshair', visibility: 'hidden' });
   const dot = svg('circle', { r: 4, class: 'marker', visibility: 'hidden' });
   const hit = svg('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r, height: H - pad.t - pad.b, class: 'hit-area' });
   plot.append(cross, dot, hit);
   hit.addEventListener('pointermove', (e) => {
     const box = plot.getBoundingClientRect();
-    const sx = ((e.clientX - box.left) / box.width) * W;
-    const x = Math.max(xLo, Math.min(xHi, xLo + ((sx - pad.l) / (W - pad.l - pad.r)) * (xHi - xLo)));
+    const raw = fromPx(((e.clientX - box.left) / box.width) * W);
+    const x = o.snap ? o.snap(raw) : raw;
     for (const node of [cross, dot]) node.setAttribute('visibility', 'visible');
     cross.setAttribute('x1', String(px(x)));
     cross.setAttribute('x2', String(px(x)));
     dot.setAttribute('cx', String(px(x)));
-    dot.setAttribute('cy', String(py(silu(x))));
-    tip.textContent = `x = ${x.toFixed(2)} · σ(x) = ${sigmoid(x).toFixed(3)} · SiLU = ${silu(x).toFixed(3)} · ReLU = ${Math.max(0, x).toFixed(2)}`;
+    dot.setAttribute('cy', String(py(o.f(x))));
+    tip.textContent = o.describe(x);
     tip.hidden = false;
     tip.style.left = `${(px(x) / W) * 100}%`;
   });
@@ -411,6 +467,115 @@ function siluChart(): HTMLElement {
     tip.hidden = true;
   });
   return root;
+}
+
+// ---------------------------------------------------------------------------------------------
+// RoPE: rotate each dimension pair of q and k by position · θ_i
+
+/** Dimension pairs drawn as dials: from the fastest to the slowest. */
+const DIAL_PAIRS = [0, 4, 8, 16, 24, 32, 48, 63];
+
+/** Tokens, compactly: 6.3, 1,234, 12K, 3.1M. */
+function tokens(n: number): string {
+  if (n >= 1e6) return `${+(n / 1e6).toPrecision(2)}M`;
+  if (n >= 1e4) return `${+(n / 1e3).toPrecision(3)}K`;
+  return n >= 100 || Number.isInteger(n) ? Math.round(n).toLocaleString('en-US') : n.toPrecision(2);
+}
+
+function ropeViz(body: HTMLElement, focus: RopeStage): void {
+  const pairs = model.headDim / 2;
+  const theta = Array.from({ length: pairs }, (_, i) => model.ropeTheta ** ((-2 * i) / model.headDim));
+  const wavelength = theta.map((t) => (2 * Math.PI) / t);
+  const ctx = model.maxContext;
+
+  // 1. Frequencies.
+  const sFreq = stageSection(body, focus === 'freq', 'θ_i: one frequency per dimension pair',
+    `Each head's ${model.headDim} dimensions form ${pairs} pairs; pair i rotates by θ_i = ` +
+    `${model.ropeTheta.toLocaleString('en-US')}^(−2i/${model.headDim}) radians per token. ` +
+    `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice to fill head_dim.`);
+  const cFreq = barChart('wavelength 2π/θ_i in tokens (log scale), by pair', 'line: context length');
+  const fFreq = el('div', { className: 'op-popup-facts' });
+  sFreq.append(cFreq.root, fFreq);
+  const logLambda = wavelength.map(Math.log10);
+  cFreq.draw({
+    values: logLambda, lo: 0, hi: Math.max(...logLambda, Math.log10(ctx)) * 1.05,
+    ticks: [0, 16, 32, 48, pairs - 1], tickLabel: String, yTick: (v) => tokens(10 ** v),
+    refs: [{ value: Math.log10(ctx), label: `context ${ctx.toLocaleString('en-US')}`, start: true }],
+    describe: (i) => `pair ${i} · θ = ${theta[i].toPrecision(3)} rad/token · one turn every ${tokens(wavelength[i])} tokens`,
+  });
+  const slow = wavelength.filter((l) => l > ctx).length;
+  fFreq.innerHTML =
+    `Wavelengths run from <b>${tokens(wavelength[0])}</b> to <b>${tokens(wavelength[pairs - 1])}</b> tokens. ` +
+    `<b>${slow}</b> of ${pairs} pairs turn less than once within the ${ctx.toLocaleString('en-US')}-token context: ` +
+    'fast pairs tell neighbors apart, slow pairs carry coarse, long-range position.';
+
+  // 2. Rotation by position.
+  const sRot = stageSection(body, focus === 'rotate', 'RoPE: rotate each pair by pos · θ_i',
+    'q and k are split into pairs (HF rotate_half pairs dimension i with i + 64, not neighbors), and each pair is ' +
+    'rotated like a 2D vector. No parameters, nothing added: the vector keeps its length, only its angles change.');
+  const maxLog = Math.round(Math.log2(ctx) * 100);
+  const pos = el('input', { type: 'range', min: '0', max: String(maxLog), step: '1', value: '700' });
+  const posShown = el('b');
+  const posRow = el('label', { className: 'op-popup-control' });
+  posRow.append(el('span', { textContent: 'Position' }), pos, posShown);
+  const dials = svg('svg', { viewBox: '0 0 560 250', role: 'img', 'aria-label': 'Rotation of selected dimension pairs' });
+  const dialFig = el('figure', { className: 'op-chart' });
+  dialFig.append(dials);
+  const fRot = el('div', { className: 'op-popup-facts' });
+  sRot.append(posRow, dialFig, fRot);
+
+  function drawDials() {
+    const p = Math.round(2 ** (Number(pos.value) / 100)) - 1;
+    posShown.textContent = p.toLocaleString('en-US');
+    dials.replaceChildren();
+    DIAL_PAIRS.filter((i) => i < pairs).forEach((i, k) => {
+      const cx = 70 + (k % 4) * 140;
+      const cy = 60 + Math.floor(k / 4) * 125;
+      const r = 36;
+      const angle = p * theta[i];
+      dials.append(svg('circle', { cx, cy, r, class: 'dial' }));
+      dials.append(svg('line', { x1: cx, y1: cy, x2: cx + r, y2: cy, class: 'ref' }));
+      // Counterclockwise, as angles are drawn in math.
+      dials.append(svg('line', { x1: cx, y1: cy, x2: cx + r * Math.cos(angle), y2: cy - r * Math.sin(angle), class: 'hand' }));
+      dials.append(svg('circle', { cx: cx + r * Math.cos(angle), cy: cy - r * Math.sin(angle), r: 4, class: 'marker' }));
+      const turns = angle / (2 * Math.PI);
+      const label = svg('text', { x: cx, y: cy + r + 16, class: 'tick', 'text-anchor': 'middle' });
+      label.textContent = `pair ${i} · λ ${tokens(wavelength[i])}`;
+      const sub = svg('text', { x: cx, y: cy + r + 28, class: 'tick', 'text-anchor': 'middle' });
+      sub.textContent = turns >= 1 ? `${turns >= 100 ? Math.round(turns).toLocaleString('en-US') : turns.toFixed(1)} turns` : `${((angle * 180) / Math.PI).toFixed(1)}°`;
+      dials.append(label, sub);
+    });
+    fRot.innerHTML =
+      `At position <b>${p.toLocaleString('en-US')}</b>, pair 0 has turned <b>${tokens(p * theta[0] / (2 * Math.PI))}</b> times ` +
+      `and pair ${pairs - 1} by <b>${((p * theta[pairs - 1] * 180) / Math.PI).toFixed(2)}°</b>. ` +
+      'K is cached after rotation, so each cached row already carries its position.';
+  }
+  pos.addEventListener('input', drawDials);
+  drawDials();
+
+  // 3. Relative position.
+  const sRel = stageSection(body, focus === 'rotate', 'Q · K sees only the distance',
+    'Rotating q by m · θ_i and k by n · θ_i turns each pair\'s dot product into one rotated by (m − n) · θ_i: ' +
+    'the score depends on the distance m − n, not on where the two tokens are.');
+  const score = (d: number) => theta.reduce((a, t) => a + Math.cos(d * t), 0) / pairs;
+  sRel.append(lineChart({
+    caption: '<span class="op-legend"><i class="swatch-line"></i>q · k for the same vector at distance m − n (1 = no rotation)</span>',
+    label: 'Score of identical q and k against their distance',
+    x: { lo: 1, hi: ctx, log: true, ticks: [1, 10, 100, 1000, 10000].filter((x) => x <= ctx), tickLabel: tokens },
+    y: { lo: -0.2, hi: 1, ticks: [0, 0.5, 1] },
+    f: score,
+    snap: Math.round,
+    samples: 1600,
+    describe: (d) => `distance ${d.toLocaleString('en-US')} · score ${score(d).toFixed(3)}`,
+  }));
+  const fRel = el('div', { className: 'op-popup-facts' });
+  fRel.innerHTML =
+    `For q = k with equal weight in every pair, the score falls from <b>1</b> at distance 0 to about ` +
+    `<b>${score(100).toFixed(2)}</b> at 100 and <b>${score(Math.min(4000, ctx)).toFixed(2)}</b> at ${tokens(Math.min(4000, ctx))}, ` +
+    'with ripples from the fast pairs: nearby tokens line up more easily. Real heads learn which pairs to use.';
+  sRel.append(fRel);
+
+  (focus === 'freq' ? sFreq : sRot).scrollIntoView({ block: 'center' });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -512,10 +677,12 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
 
 interface Draw {
   values: number[];
-  /** Horizontal reference lines, labeled at the right. */
-  refs?: { value: number; label: string }[];
+  /** Horizontal reference lines, labeled at the right (or the left, with `start`). */
+  refs?: { value: number; label: string; start?: boolean }[];
   /** Label of the column ticks (default: rank, #1). */
   tickLabel?: (i: number) => string;
+  /** Label of the value ticks (default: the value, compact). */
+  yTick?: (v: number) => string;
   /** Columns that get a tick label (default: ranks 1, 10, 20, …). */
   ticks?: number[];
   lo: number;
@@ -550,7 +717,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
   }
   root.append(plot, tip);
 
-  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
+  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], yTick, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
     const x0 = pad.l;
     const band = (W - pad.l - pad.r) / values.length;
@@ -563,7 +730,7 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
     for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
       plot.append(svg('line', { x1: x0, x2: W - pad.r, y1: y(v), y2: y(v), class: Math.abs(v) < 1e-9 ? 'axis' : 'grid' }));
       const label = svg('text', { x: x0 - 6, y: y(v) + 3, class: 'tick', 'text-anchor': 'end' });
-      label.textContent = percent ? `${Math.round(v * 1000) / 10}%` : tickText(v, step);
+      label.textContent = percent ? `${Math.round(v * 1000) / 10}%` : yTick ? yTick(v) : tickText(v, step);
       plot.append(label);
     }
 
@@ -591,7 +758,9 @@ function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' =
 
     for (const ref of refs) {
       plot.append(svg('line', { x1: x0, x2: W - pad.r, y1: y(ref.value), y2: y(ref.value), class: 'ref' }));
-      const label = svg('text', { x: W - pad.r - 2, y: y(ref.value) - 4, class: 'tick', 'text-anchor': 'end' });
+      const label = ref.start
+        ? svg('text', { x: x0 + 4, y: y(ref.value) - 4, class: 'tick', 'text-anchor': 'start' })
+        : svg('text', { x: W - pad.r - 2, y: y(ref.value) - 4, class: 'tick', 'text-anchor': 'end' });
       label.textContent = ref.label;
       plot.append(label);
     }

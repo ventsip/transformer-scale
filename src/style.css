@@ -454,3 +454,15 @@ button.play {
 .op-chart .bar.weight {
   fill: #4f8ff7;
 }
+
+/* RoPE dials: a reference ray at angle 0 and the rotated pair. */
+.op-chart .dial {
+  fill: none;
+  stroke: #334155;
+  stroke-width: 1;
+}
+
+.op-chart .hand {
+  stroke: #f5a524;
+  stroke-width: 2;
+}
