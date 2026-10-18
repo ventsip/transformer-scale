@@ -130,6 +130,8 @@ export type OpViz =
   | { panel: 'attention'; stage: 'scores' | 'softmax' | 'output' }
   | { panel: 'rope'; stage: 'freq' | 'rotate' }
   | { panel: 'rmsnorm'; stage: 'input' | 'mean' | 'normalize' | 'weight' }
+  | { panel: 'layernorm' }
+  | { panel: 'gelu' }
   | { panel: 'swiglu'; stage: 'silu' | 'gate' };
 export type VizStage<P extends OpViz['panel']> = Extract<OpViz, { panel: P; stage: unknown }>['stage'];
 
@@ -367,7 +369,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const out = act(id, `${id} = LayerNorm(${what})`, dModel);
     op('LayerNorm', [input, w, b], out,
       `Per token: subtract the mean, divide by √(variance + ${cfg.normEps}), then × weight + bias (${2 * cfg.dModel} parameters). ` +
-      'One fused kernel (torch.nn.LayerNorm): no intermediate tensors, unlike Llama\'s RMSNorm written in PyTorch.');
+      'One fused kernel (torch.nn.LayerNorm): no intermediate tensors, unlike Llama\'s RMSNorm written in PyTorch.', { viz: { panel: 'layernorm' } });
     return out;
   };
 
@@ -720,7 +722,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const a = stacked('a', 'a = GELU(h_fc)', ffn, o.actDtype, TRANSIENT);
       op('GELU', [hfc], a,
         'GELU, tanh approximation ("gelu_new"): 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³))). HF writes it in ' +
-        'plain PyTorch, so each step (x³, products, tanh, sums) passes a full T × d_ffn temporary through memory; drawn as one op.');
+        'plain PyTorch, so each step (x³, products, tanh, sums) passes a full T × d_ffn temporary through memory; drawn as one op.', { viz: { panel: 'gelu' } });
       const m = stacked('m', 'm = a · W_proj + b', dModel, o.actDtype, TRANSIENT);
       matmul(a, wproj, m, ffn, dModel, { bias: bproj });
       op('+', [m, h], nextFloorX(), "Residual add: h + m is this layer's output and the next floor's input.");

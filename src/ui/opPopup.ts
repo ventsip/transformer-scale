@@ -1,4 +1,4 @@
-import { formatBytes, formatInt, formatPercent } from '../format';
+import { formatBytes, formatFlops, formatInt, formatPercent } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
@@ -32,6 +32,8 @@ const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLEleme
   rope: { title: 'RoPE: rotary position embedding', render: (body, viz) => ropeViz(body, viz.stage) },
   rmsnorm: { title: 'RMSNorm: x / RMS(x) · weight', render: (body, viz) => rmsNormViz(body, viz.stage) },
   swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage) },
+  gelu: { title: 'GELU: a = h · Φ(h), tanh approximation', render: (body) => geluViz(body) },
+  layernorm: { title: 'LayerNorm: (x − mean) / std · weight + bias', render: (body) => layerNormViz(body) },
 };
 
 /** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
@@ -356,6 +358,132 @@ function siluChart(): HTMLElement {
     marker: { x: SILU_MIN_X, label: `min ${minY.toFixed(3)}` },
     describe: (x) => `x = ${x.toFixed(2)} · σ(x) = ${sigmoid(x).toFixed(3)} · SiLU = ${silu(x).toFixed(3)} · ReLU = ${Math.max(0, x).toFixed(2)}`,
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// GELU (GPT-2): a = GELU(h_fc), the tanh approximation ("gelu_new")
+
+/** Error function, Abramowitz & Stegun 7.1.26 (error below 1.5e-7). */
+function erf(x: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-x * x);
+  return x < 0 ? -y : y;
+}
+/** Φ, the standard normal CDF. */
+const phi = (x: number) => 0.5 * (1 + erf(x / Math.SQRT2));
+/** Exact GELU: x · Φ(x). */
+const geluExact = (x: number) => x * phi(x);
+/** GPT-2's gelu_new, as HF NewGELUActivation computes it. */
+const GELU_CUBIC = 0.044715;
+const geluTanh = (x: number) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + GELU_CUBIC * x ** 3)));
+
+/** Where `f` is smallest on [lo, hi], for a function with one minimum there (ternary search). */
+function argmin(f: (x: number) => number, lo: number, hi: number): number {
+  for (let i = 0; i < 100; i++) {
+    const a = lo + (hi - lo) / 3;
+    const b = hi - (hi - lo) / 3;
+    if (f(a) < f(b)) hi = b;
+    else lo = a;
+  }
+  return (lo + hi) / 2;
+}
+
+/** The range the GELU curve is drawn over. */
+const GELU_RANGE = 6;
+
+/**
+ * HF NewGELUActivation, 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³))), one PyTorch kernel per step: what each
+ * reads and writes, in full T × d_ffn tensors (Python evaluates 0.5 · x first).
+ */
+const GELU_KERNELS: { what: string; reads: number }[] = [
+  { what: '0.5 · x', reads: 1 },
+  { what: 'x³', reads: 1 },
+  { what: '0.044715 · x³', reads: 1 },
+  { what: 'x + …', reads: 2 },
+  { what: '√(2/π) · …', reads: 1 },
+  { what: 'tanh(…)', reads: 1 },
+  { what: '1 + …', reads: 1 },
+  { what: '0.5x · (…)', reads: 2 },
+];
+
+function geluViz(body: HTMLElement): void {
+  const minX = argmin(geluTanh, -3, 0);
+  let maxDiff = 0;
+  for (let x = -GELU_RANGE; x <= GELU_RANGE; x += 0.001) maxDiff = Math.max(maxDiff, Math.abs(geluTanh(x) - geluExact(x)));
+
+  const sCurve = stageSection(body, true, 'GELU(x) = x · Φ(x)',
+    'Φ(x) is the probability that a standard normal value is below x: GELU passes x weighted by how likely it is to be ' +
+    'large. Like ReLU far from 0, smooth near it. GPT-2 uses the tanh approximation ("gelu_new"). No parameters.');
+  sCurve.append(lineChart({
+    caption: '<span class="op-legend"><i class="swatch-line"></i>GELU(x), tanh approximation</span>' +
+      '<span class="op-legend"><i class="swatch-ref"></i>ReLU(x) = max(0, x), for reference</span>',
+    label: `GELU and ReLU from x = −${GELU_RANGE} to ${GELU_RANGE}`,
+    x: { lo: -GELU_RANGE, hi: GELU_RANGE, ticks: [-6, -4, -2, 0, 2, 4, 6], tickLabel: String },
+    y: { lo: -1, hi: GELU_RANGE, ticks: [-1, 0, 1, 2, 3, 4, 5, 6] },
+    f: geluTanh,
+    ref: (x) => Math.max(0, x),
+    marker: { x: minX, label: `min ${geluTanh(minX).toFixed(3)}` },
+    describe: (x) => `x = ${x.toFixed(2)} · Φ(x) = ${phi(x).toFixed(3)} · GELU = ${geluTanh(x).toFixed(3)} · exact ${geluExact(x).toFixed(3)} · ReLU = ${Math.max(0, x).toFixed(2)}`,
+  }));
+  const fCurve = el('div', { className: 'op-popup-facts' });
+  fCurve.innerHTML =
+    `Its minimum is <b>${geluTanh(minX).toFixed(3)}</b> at x = <b>${minX.toFixed(2)}</b>. The tanh form differs from ` +
+    `the exact x · Φ(x) by at most <b>${maxDiff.toExponential(1)}</b> on this range, below bf16's step of <b>2⁻⁷ ≈ 0.008</b> near 1: in bf16 the two forms barely differ. ` +
+    `SwiGLU's SiLU, x · σ(x), is a close cousin: x · σ(1.702x) approximates GELU.`;
+  sCurve.append(fCurve);
+
+  const sApply = stageSection(body, false, 'a = GELU(h_fc): one token',
+    `h_fc = h_norm · W_fc + b, ${formatInt(model.dFfn)} features wide (4 · d_model). Illustrative values from both ends ` +
+    'of them; unlike SwiGLU there is no second projection: the activation alone decides what passes.');
+  const resample = el('button', { textContent: 'Another token' });
+  const row = el('div', { className: 'op-popup-control' });
+  row.append(resample);
+  const cIn = barChart('h_fc', '');
+  const cOut = barChart('a = GELU(h_fc)', 'outlines: h_fc');
+  const fApply = el('div', { className: 'op-popup-facts' });
+  sApply.append(row, cIn.root, cOut.root, fApply);
+
+  let seed = 13;
+  function update() {
+    const normal = gaussian(rng(seed));
+    const hFull = Array.from({ length: model.dFfn }, () => GATE_SCALE * normal());
+    const ends = bothEnds(model.dFfn, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
+    const h = ends.values((k) => hFull[k]);
+    const a = h.map(geluTanh);
+    const lo = Math.min(...h, ...a);
+    const hi = Math.max(...h, ...a);
+    const f = (v: number) => v.toFixed(2);
+    const axis = { lo, hi, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
+    const describe = (text: (i: number) => string) => (i: number) =>
+      (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(i)}`);
+    cIn.draw({ values: h, ...axis, describe: describe((i) => `h_fc = ${f(h[i])}`) });
+    cOut.draw({ values: a, ghost: h, ...axis, describe: describe((i) => `GELU(${f(h[i])}) = ${f(a[i])}`) });
+    const negative = hFull.filter((v) => v < 0).length;
+    fApply.innerHTML =
+      `<b>${formatInt(negative)}</b> of ${formatInt(model.dFfn)} features are negative: GELU squeezes them into ` +
+      `[${geluTanh(minX).toFixed(2)}, 0]. Positive ones pass almost unchanged once above ~2.`;
+  }
+  resample.addEventListener('click', () => {
+    seed++;
+    update();
+  });
+  update();
+
+  const sCost = stageSection(body, false, 'In memory: eight kernels',
+    'HF writes gelu_new in plain PyTorch, so each step is its own kernel with its own full-size output. The scene draws ' +
+    'it as one op; a fused kernel would read h_fc once and write a once.');
+  const rows = pass.mode === 'decode' ? 1 : pass.T;
+  const tensor = rows * model.dFfn * DTYPES[pass.actDtype].bytes;
+  const reads = GELU_KERNELS.reduce((s, k) => s + k.reads, 0);
+  const traffic = (reads + GELU_KERNELS.length) * tensor;
+  const fCost = el('div', { className: 'op-popup-facts' });
+  fCost.innerHTML =
+    `${GELU_KERNELS.map((k) => k.what).join(' → ')}: <b>${GELU_KERNELS.length}</b> kernels, ${reads} tensor reads and ` +
+    `${GELU_KERNELS.length} writes. In this pass each tensor is ${formatInt(rows)} × ${formatInt(model.dFfn)} ` +
+    `${DTYPES[pass.actDtype].label} = <b>${formatBytes(tensor)}</b>, so GELU moves <b>${formatBytes(traffic)}</b> per layer, ` +
+    `against <b>${formatBytes(2 * tensor)}</b> fused: ${((reads + GELU_KERNELS.length) / 2).toFixed(0)}× more, for about ` +
+    `${formatFlops(rows * model.dFfn * GELU_KERNELS.length)} FLOPs of arithmetic (about one per element per kernel).`;
+  sCost.append(fCost);
 }
 
 interface LineChartOptions {
@@ -1046,14 +1174,28 @@ const NORM_EPS = 1e-5;
 /** Residual streams have a few outlier features far larger than the rest ("massive activations"). */
 const OUTLIERS: [number, number][] = [[11, 14], [40, -9]];
 
-function rmsNormViz(body: HTMLElement, focus: NormStage): void {
-  const rand = rng(5);
-  const normal = gaussian(rand);
+/**
+ * One illustrative token of the residual stream, with its outliers, and a norm's learned per-feature scales for it
+ * (mostly 0.2–0.6, smaller on the outlier features). `normal` draws further values from the same generator.
+ */
+function illustrativeToken() {
+  const normal = gaussian(rng(5));
   const base = Array.from({ length: NORM_FEATURES }, () => 0.8 * normal());
   for (const [i, v] of OUTLIERS) base[i] = v;
-  // Learned scales: illustrative, mostly 0.2–0.6, smaller on the outlier features.
   const gamma = base.map(() => Math.abs(0.4 + 0.12 * normal()));
   for (const [i] of OUTLIERS) gamma[i] = 0.05;
+  return { base, gamma, normal };
+}
+
+/** Column ticks and value format of the norm charts. */
+const NORM_TICKS = [0, 16, 32, 48, NORM_FEATURES - 1];
+const normValue = (v: number) =>
+  Math.abs(v) >= 1000 ? formatInt(Math.round(v)) : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
+/** The range of a chart of `vs`, including 0. */
+const extentWithZero = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max(0, ...vs) });
+
+function rmsNormViz(body: HTMLElement, focus: NormStage): void {
+  const { base, gamma } = illustrativeToken();
 
   const sInput = stageSection(body, focus === 'input', 'x: one token',
     `The residual stream of one token, upcast to fp32. Illustrative: ${NORM_FEATURES} features standing in for d_model, ` +
@@ -1084,11 +1226,10 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   const cOut = barChart('x / RMS(x) · weight', 'outlines: x / RMS(x)');
   sWeight.append(cGamma.root, cOut.root);
 
-  const ticks = [0, 16, 32, 48, NORM_FEATURES - 1];
-  const tickLabel = (i: number) => String(i);
-  const f = (v: number) =>
-    Math.abs(v) >= 1000 ? formatInt(Math.round(v)) : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
-  const extent = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max(0, ...vs) });
+  const ticks = NORM_TICKS;
+  const tickLabel = String;
+  const f = normValue;
+  const extent = extentWithZero;
 
   function update() {
     const s = 10 ** Number(scale.value);
@@ -1132,6 +1273,117 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   scale.addEventListener('input', update);
   update();
   ({ input: sInput, mean: sMean, normalize: sNorm, weight: sWeight })[focus].scrollIntoView({ block: 'center' });
+}
+
+// ---------------------------------------------------------------------------------------------
+// LayerNorm (GPT-2): (x − mean(x)) / √(var(x) + ε) · weight + bias
+
+function layerNormViz(body: HTMLElement): void {
+  const { base, gamma, normal } = illustrativeToken();
+  // Learned biases: illustrative, small.
+  const beta = base.map(() => 0.1 * normal());
+  const eps = model.normEps;
+  const mean = (vs: number[]) => vs.reduce((a, b) => a + b, 0) / vs.length;
+  const f = normValue;
+  const ticks = NORM_TICKS;
+  const tickLabel = String;
+
+  const sInput = stageSection(body, true, 'x: one token',
+    `The residual stream of one token. Illustrative: ${NORM_FEATURES} features standing in for d_model (${formatInt(model.dModel)}), ` +
+    'including two outliers. The sliders shift and scale x: LayerNorm undoes both.');
+  const slider = (label: string, min: number, max: number, value: number) => {
+    const input = el('input', { type: 'range', min: String(min), max: String(max), step: '0.01', value: String(value) });
+    const shown = el('b');
+    const row = el('label', { className: 'op-popup-control' });
+    row.append(el('span', { textContent: label }), input, shown);
+    return { input, shown, row };
+  };
+  const shift = slider('Shift x by', -5, 5, 0);
+  const scale = slider('Scale x by', -2, 2, 0);
+  const cX = barChart('x', 'line: mean(x)');
+  const fX = el('div', { className: 'op-popup-facts' });
+  sInput.append(shift.row, scale.row, cX.root, fX);
+
+  const sCenter = stageSection(body, false, 'x − mean(x)',
+    "Subtracts the token's mean, so the features average 0. This is the step RMSNorm leaves out.");
+  const cCentered = barChart('x − mean(x)', 'outlines: x');
+  const fCenter = el('div', { className: 'op-popup-facts' });
+  sCenter.append(cCentered.root, fCenter);
+
+  const sNorm = stageSection(body, false, 'Divide by √(var(x) + ε)',
+    'The variance is the mean of the squared centered values; dividing by its square root gives the features a standard ' +
+    'deviation of 1. The vector loses two degrees of freedom: its mean and its scale.');
+  const cNorm = barChart('(x − mean) / std', 'lines: ±1');
+  const fNorm = el('div', { className: 'op-popup-facts' });
+  sNorm.append(cNorm.root, fNorm);
+
+  const sAffine = stageSection(body, false, '× weight + bias',
+    `A learned scale and a learned shift per feature: ${formatInt(2 * model.dModel)} parameters (2 · d_model; RMSNorm has ` +
+    'only the scale). Illustrative values.');
+  const cGamma = barChart('weight', '', 'weight');
+  const cBeta = barChart('bias', '', 'weight');
+  const cOut = barChart('(x − mean) / std · weight + bias', 'outlines: before weight and bias');
+  sAffine.append(cGamma.root, cBeta.root, cOut.root);
+
+  const sCost = stageSection(body, false, 'In memory: one kernel',
+    'torch.nn.LayerNorm runs as one fused kernel: it reads x and the parameters once and writes the output, keeping the ' +
+    'mean and variance in registers.');
+  const rows = pass.mode === 'decode' ? 1 : pass.T;
+  const tensor = rows * model.dModel * DTYPES[pass.actDtype].bytes;
+  const fCost = el('div', { className: 'op-popup-facts' });
+  fCost.innerHTML =
+    `In this pass x is ${formatInt(rows)} × ${formatInt(model.dModel)} ${DTYPES[pass.actDtype].label} = ` +
+    `<b>${formatBytes(tensor)}</b>: the kernel moves about <b>${formatBytes(2 * tensor)}</b> (x in, the output out), ` +
+    `twice per layer (ln_1 and ln_2) and once more at the top (ln_f). Llama's RMSNorm, written in PyTorch, passes ` +
+    'several fp32 temporaries through memory instead (see the expanded elementwise detail).';
+  sCost.append(fCost);
+
+  function update() {
+    const b = Number(shift.input.value);
+    const s = 10 ** Number(scale.input.value);
+    shift.shown.textContent = `${b >= 0 ? '+' : '−'}${Math.abs(b).toFixed(2)}`;
+    scale.shown.textContent = `×${s < 1 ? s.toPrecision(2) : s.toFixed(s < 10 ? 2 : 1)}`;
+    const x = base.map((v) => v * s + b);
+    const mu = mean(x);
+    const centered = x.map((v) => v - mu);
+    const variance = mean(centered.map((v) => v * v));
+    const r = 1 / Math.sqrt(variance + eps);
+    const n = centered.map((v) => v * r);
+    const out = n.map((v, i) => v * gamma[i] + beta[i]);
+    // RMSNorm of the same x, without centering: the shift leaks into its output.
+    const rms = Math.sqrt(mean(x.map((v) => v * v)) + eps);
+    const baseRms = Math.sqrt(mean(base.map((v) => v * v)));
+    const rmsDrift = Math.sqrt(mean(x.map((v, i) => (v / rms - base[i] / baseRms) ** 2)));
+
+    cX.draw({ values: x, ...extentWithZero(x), ticks, tickLabel, refs: [{ value: mu, label: 'mean' }], describe: (i) => `feature ${i} · x = ${f(x[i])}` });
+    fX.innerHTML = `mean(x) = <b>${f(mu)}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
+
+    cCentered.draw({
+      values: centered, ghost: x, ...extentWithZero([...centered, ...x]), ticks, tickLabel,
+      describe: (i) => `feature ${i} · ${f(x[i])} − ${f(mu)} = ${f(centered[i])}`,
+    });
+    fCenter.innerHTML =
+      `Shift x with the slider: the outlines move, the bars do not. RMSNorm divides x itself by its RMS, so a shift ` +
+      `changes its output: by <b>${f(rmsDrift)}</b> (RMS of the change) at this setting.`;
+
+    cNorm.draw({
+      values: n, ...extentWithZero([...n, 1, -1]), ticks, tickLabel, refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
+      describe: (i) => `feature ${i} · ${f(centered[i])} × ${f(r)} = ${f(n[i])}`,
+    });
+    fNorm.innerHTML =
+      `var(x) = <b>${f(variance)}</b>, ε = ${eps}, so 1/√(var + ε) = <b>${f(r)}</b>. After: mean <b>${Math.abs(mean(n)) < 1e-9 ? 0 : f(mean(n))}</b>, ` +
+      `standard deviation <b>${Math.sqrt(mean(n.map((v) => v * v))).toFixed(3)}</b>, whatever the sliders say.`;
+
+    cGamma.draw({ values: gamma, ...extentWithZero(gamma), ticks, tickLabel, describe: (i) => `feature ${i} · weight = ${f(gamma[i])}` });
+    cBeta.draw({ values: beta, ...extentWithZero(beta), ticks, tickLabel, describe: (i) => `feature ${i} · bias = ${f(beta[i])}` });
+    cOut.draw({
+      values: out, ghost: n, ...extentWithZero([...out, ...n]), ticks, tickLabel,
+      describe: (i) => `feature ${i} · ${f(n[i])} × ${f(gamma[i])} + ${f(beta[i])} = ${f(out[i])}`,
+    });
+  }
+  shift.input.addEventListener('input', update);
+  scale.input.addEventListener('input', update);
+  update();
 }
 
 interface Draw {
