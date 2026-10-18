@@ -11,7 +11,7 @@ import {
   type HeadSelection, type TensorSpec,
 } from './model/tensors';
 import { FlowScene, LOOP_COLOR, RESIDUAL_COLOR, linkedTensors, pipeDiameter, type Edge } from './scene/flowScene';
-import { KIND_COLORS, MASKED_COLORS, TensorScene, type Pick } from './scene/tensorScene';
+import { KIND_COLORS, MASKED_COLORS, ROLE_COLORS, TensorScene, type Pick } from './scene/tensorScene';
 import { SectionScene } from './scene/sectionScene';
 import { floorParts, type Part } from './model/sections';
 import { createControls, maxTokens, type Settings } from './ui/controls';
@@ -372,6 +372,9 @@ document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.weight.fill, 'Weights'),
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
   swatch(KIND_COLORS.kv.fill, 'K, V: KV cache'),
+  swatch(ROLE_COLORS.q, 'W_q: query projection'),
+  swatch(ROLE_COLORS.k, 'W_k: key projection'),
+  swatch(ROLE_COLORS.v, 'W_v: value projection'),
   swatch(RESIDUAL_COLOR, 'Residual stream'),
   swatch(LOOP_COLOR, 'Generation loop'),
   swatch(KIND_COLORS.buffer.fill, 'Buffers (fixed, not learned)'),

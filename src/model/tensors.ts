@@ -3,6 +3,9 @@ import { DTYPES, type DType } from './dtypes';
 import { formatCount, formatFlops } from '../format';
 import { routing } from './routing';
 
+/** Which attention projection a weight (or a part of a fused one) is: queries, keys or values. */
+export type Role = 'q' | 'k' | 'v';
+
 /**
  * weight: parameters. activation: transient intermediates.
  * kv: activations that are written to the KV cache and persist.
@@ -51,6 +54,10 @@ export interface TensorSpec {
   centered?: boolean;
   /** Part of the residual stream: the edges that carry it are drawn bold. */
   residual?: boolean;
+  /** Attention role of a projection weight: W_q, W_k or W_v. */
+  role?: Role;
+  /** A fused Q/K/V projection weight (GPT-2's c_attn): its output dim, along Z, holds Q, K and V in equal thirds. */
+  fusedRoles?: boolean;
   /** Mixture of experts: the expert this tensor belongs to. */
   expert?: number;
   /** Weights of an expert no token is routed to in this pass: never read, drawn dimmed. */
@@ -207,6 +214,11 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   /** Marks a tensor as split into heads; `axis` overrides the split's default. */
   const split = (id: string, heads: HeadSplit, axis = heads.axis) => {
     tensors.find((t) => t.id === id)!.heads = { ...heads, axis };
+    return id;
+  };
+  /** Marks a tensor as part of the Q, K or V path (see TensorSpec.role). */
+  const role = (id: string, r: 'q' | 'k' | 'v') => {
+    tensors.find((t) => t.id === id)!.role = r;
     return id;
   };
   const residual = (id: string) => {
@@ -498,7 +510,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const cap = o.cacheCapacity;
     const fresh = decode ? 1 : undefined;
     const cacheDims = (rows: Dim) => [rows, kvDim];
-    const cacheWrite = (src: string, id: string, label: string, name: string) => {
+    const cacheWrite = (src: string, id: string, label: string, name: 'K' | 'V') => {
       if (keepsKv) return src;
       if (isStatic) {
         const buffer = split(push({
@@ -536,7 +548,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       // tensor. Drawn as its three column blocks, each reading a third of the weight; position is already in x.
       const qkvDim: Dim = { name: '3 · d_model (Q, K, V)', size: 3 * cfg.dModel };
       const wqkv = weight('attn.c_attn.weight', dModel, qkvDim,
-        `Q, K and V projections fused into one matrix (Conv1D: input dim first). ${gqaNote}`);
+        `Q, K and V projections fused into one matrix (Conv1D: input dim first): output columns 0–${cfg.dModel - 1} are W_q, then W_k, then W_v. ${gqaNote}`);
+      tensors[tensors.length - 1].fusedRoles = true;
       const bqkv = vector('attn.c_attn.bias', qkvDim);
       const third = (out: string, dim: Dim, what: string) => {
         matmul(xNorm, wqkv, out, dModel, dim, n, bqkv);
@@ -557,14 +570,14 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');
       next();
     } else {
-      const wq = split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z');
+      const wq = role(split(weight('self_attn.q_proj.weight', dModel, qDim), qHeads, 'z'), 'q');
       const qRaw = split(act('q_raw', 'x_norm · W_q (before RoPE)', qDim), qHeads);
       matmul(xNorm, wq, qRaw, dModel, qDim);
       next();
       q = split(act('q', 'Q = RoPE(x_norm · W_q)', qDim), qHeads);
       ropeOp(qRaw, q, cfg.nHeads);
       next();
-      const wk = split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+      const wk = role(split(weight('self_attn.k_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z'), 'k');
       const kRaw = split(act('k_raw', 'x_norm · W_k (before RoPE)', kvDim), kvHeads);
       matmul(xNorm, wk, kRaw, dModel, kvDim);
       next();
@@ -572,7 +585,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       ropeOp(kRaw, k, cfg.nKvHeads);
       kCached = cacheWrite(k, 'k_cache', `past_key_values.layers[${l}].keys`, 'K');
       next();
-      const wv = split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z');
+      const wv = role(split(weight('self_attn.v_proj.weight', dModel, kvDim, gqaNote), kvHeads, 'z'), 'v');
       const v = split(act('v', 'V = x_norm · W_v', kvDim, kvKind, kvNote('')), kvHeads);
       matmul(xNorm, wv, v, dModel, kvDim);
       vCached = cacheWrite(v, 'v_cache', `past_key_values.layers[${l}].values`, 'V');

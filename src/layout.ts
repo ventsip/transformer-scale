@@ -1,5 +1,5 @@
 import { DTYPES } from './model/dtypes';
-import type { TensorSpec } from './model/tensors';
+import type { Role, TensorSpec } from './model/tensors';
 
 /**
  * Floor plan: 1 world unit = 1 element along X and Z.
@@ -64,6 +64,8 @@ export interface PlacedTensor {
   heads: (number | null)[];
   /** For cache tensors, which rows each box covers (see `spec.filledZ` and `spec.freshZ`). */
   rows: RowState[];
+  /** The attention role (Q, K, V projection) of each box, for color coding; null for other tensors. */
+  roles: (Role | null)[];
   /** Z of the bus line of this tensor's section. */
   busZ: number;
 }
@@ -184,7 +186,16 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
             heads.splice(0, heads.length, ...splitHeads);
             rows = splitRows;
           }
-          local.push({ spec: s, boxes, heads, rows, busZ: 0 });
+          // Each box's attention role: the projection's own, or for a fused Q/K/V weight, the third along Z it covers.
+          let roles = boxes.map(() => s.role ?? null);
+          if (s.fusedRoles) {
+            const thirds = boxes.flatMap((b) => [0, 1, 2].map((k) => ({ ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / 3), sz: b.sz / 3 })));
+            roles = boxes.flatMap(() => ['q', 'k', 'v'] as const);
+            heads.splice(0, heads.length, ...thirds.map(() => null));
+            rows = thirds.map((): RowState => 'written');
+            boxes.splice(0, boxes.length, ...thirds);
+          }
+          local.push({ spec: s, boxes, heads, rows, roles, busZ: 0 });
         }
         x0 += width + STATION_GAP;
       }

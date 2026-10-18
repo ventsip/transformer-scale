@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
 import type { Box, PlacedTensor, RowState } from '../layout';
-import { kvGroup, onPath, type HeadSelection, type TensorKind } from '../model/tensors';
+import { kvGroup, onPath, type HeadSelection, type Role, type TensorKind } from '../model/tensors';
 
 export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
   weight: { fill: 0x4f8ff7, edge: 0x9cc2ff },
@@ -12,6 +12,9 @@ export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
 
 /** Color of the causally masked half of attention-score tiles. */
 export const MASKED_COLORS = { fill: 0x64748b, edge: 0x475569 };
+
+/** Colors of the Q, K and V projection weights (tint and outline). Hues used for nothing else. */
+export const ROLE_COLORS = { q: 0xe879f9, k: 0xfb923c, v: 0x2dd4bf } as const;
 
 /**
  * Which part of a box an instance covers. Causal tiles split along the diagonal: keys run along X and
@@ -25,11 +28,15 @@ export interface Pick {
   head: number | null;
   /** For cache tensors: rows written before, by this pass, or not yet. */
   rows: RowState;
+  /** For Q, K and V projection weights (or a third of a fused one): which. */
+  role: Role | null;
   part: Part;
 }
 
 /** Mix of a group hue into a kind color: enough to match heads across tensors, not to hide the kind. */
 const GROUP_TINT = 0.3;
+/** Mix of the role color into the Q, K and V projection weights (before the group tint). */
+const ROLE_TINT = 0.5;
 /** Brightness of head bands that are not on the selected head's path. */
 const OFF_PATH = 0.2;
 /** Brightness of the reserved, not yet written part of a preallocated buffer. */
@@ -114,9 +121,10 @@ export class TensorScene {
       item.boxes.forEach((box, i) => {
         const head = item.heads[i];
         const rows = item.rows[i];
-        if (!item.spec.causal) return solid.push({ item, box, head, rows, part: 'box' });
-        kept.push({ item, box, head, rows, part: 'kept' });
-        masked.push({ item, box, head, rows, part: 'masked' });
+        const role = item.roles[i];
+        if (!item.spec.causal) return solid.push({ item, box, head, rows, role, part: 'box' });
+        kept.push({ item, box, head, rows, role, part: 'kept' });
+        masked.push({ item, box, head, rows, role, part: 'masked' });
       });
     }
     this.addInstanced(solid, this.unitBox, this.solidMaterial);
@@ -152,8 +160,10 @@ export class TensorScene {
     });
   }
 
-  private colorOf({ item, head, part, rows }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
+  private colorOf({ item, head, part, rows, role }: Pick, which: 'fill' | 'edge', out: THREE.Color): THREE.Color {
     out.setHex(part === 'masked' ? MASKED_COLORS[which] : KIND_COLORS[item.spec.kind][which]);
+    // Q, K and V projection weights: blended toward their role color, under the KV-group tint.
+    if (role) out.lerp(this.groupColor.setHex(ROLE_COLORS[role]), ROLE_TINT);
     const split = item.spec.heads;
     if (split && head !== null) {
       const groups = split.count / split.perGroup;
@@ -198,6 +208,24 @@ export class TensorScene {
       for (const [x, y, z] of OUTLINES[pick.part]) {
         positions.push(box.cx + x * box.sx, box.cy + y * box.sy, box.cz + z * box.sz);
         colors.push(color.r, color.g, color.b);
+      }
+    }
+    // Q, K and V projection weights: one outline in the role color around each role's part (the whole matrix, or a
+    // third of a fused one), over its band borders.
+    for (const item of new Set(picks.map((p) => p.item))) {
+      for (const role of new Set(item.roles)) {
+        if (!role) continue;
+        const boxes = item.boxes.filter((_, i) => item.roles[i] === role);
+        color.setHex(ROLE_COLORS[role]).multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
+        const b = {
+          minX: Math.min(...boxes.map((x) => x.cx - x.sx / 2)), maxX: Math.max(...boxes.map((x) => x.cx + x.sx / 2)),
+          minY: Math.min(...boxes.map((x) => x.cy - x.sy / 2)), maxY: Math.max(...boxes.map((x) => x.cy + x.sy / 2)),
+          minZ: Math.min(...boxes.map((x) => x.cz - x.sz / 2)), maxZ: Math.max(...boxes.map((x) => x.cz + x.sz / 2)),
+        };
+        for (const [x, y, z] of BOX_OUTLINE) {
+          positions.push(x < 0 ? b.minX : b.maxX, y < 0 ? b.minY : b.maxY, z < 0 ? b.minZ : b.maxZ);
+          colors.push(color.r, color.g, color.b);
+        }
       }
     }
     const geometry = new THREE.BufferGeometry();
