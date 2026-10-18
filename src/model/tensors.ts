@@ -363,12 +363,12 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const ne = counts[e];
       const idle = ne === 0;
       const rows: Dim = { name: `tokens routed to expert ${e}`, size: ne };
-      prefix = `${block}experts.${e}.`;
       const share = idle
         ? `No token picks expert ${e} in this pass, so its weights are not read.`
         : `Expert ${e} of ${nExperts}: ${ne.toLocaleString('en-US')} of ${n.toLocaleString('en-US')} tokens routed here.`;
       const expertWeight = (name: string, inDim: Dim, outDim: Dim, what: string, extra: Partial<TensorSpec> = {}) => {
-        const id = weight(name, inDim, outDim, `${what} ${share}`);
+        // The expert index is part of the id: each expert has its own w1, w2 and w3.
+        const id = weight(`experts.${e}.${name}`, inDim, outDim, `${what} ${share}`);
         Object.assign(tensors[tensors.length - 1], { expert: e, idle, ...extra });
         return id;
       };
