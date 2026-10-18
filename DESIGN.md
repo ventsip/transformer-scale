@@ -17,7 +17,7 @@
   behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
 - Floors above the focused one are lifted and floors below it lowered, opening space around it; other floors are dimmed.
-  The gap grows with the deepest floor (1.5 × its depth, at least 40,000), so deep floors stay visible from the focus view.
+  The gap grows with the focused floor's depth (1.5 × it, at least 40,000), so deep floors stay visible from the focus view.
 
 ## Data flow
 
@@ -35,7 +35,9 @@
   and branch outputs joining it keep their kind's color.
 - Flow is drawn for the focused floor, plus the op on the floor below that produces its input. An op whose output is
   on a higher floor sits just below that output; its inputs rise to it. Edges between
-  floors are risers: they leave heading up and enter the upper block from below.
+  floors are risers: they leave heading up and enter the upper block from below. Inputs from a lower floor into an op
+  that hovers over its output (cos / sin into RoPE, the causal mask) climb in front of the focused floor instead and come
+  down into the op from above, so they never pass through the block the op produces.
 
 ## Operation popups
 

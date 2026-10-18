@@ -74,7 +74,7 @@ scene.add(tensors.group);
 const flow = new FlowScene((f) => floorName(cfg, f), renderer.domElement);
 scene.add(flow.group);
 // For poking at the scene from the console during development.
-if (import.meta.env.DEV) Object.assign(window, { camera, controls, flow });
+if (import.meta.env.DEV) Object.assign(window, { camera, controls, flow, placedTensors: () => placed });
 
 // Floor labels, recreated when the model changes.
 let floorLabels: CSS2DObject[] = [];

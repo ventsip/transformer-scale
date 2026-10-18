@@ -7,6 +7,10 @@ import { hasViz, openOpPopup } from '../ui/opPopup';
 
 /** Height of operation nodes above the floor: they hover over the tensor they produce. */
 const OP_HOVER = 2500;
+/** Pipes climbing from a lower floor: how far in front of the focused floor they rise, and how high above their op
+ * they turn in. */
+const CLIMB_MARGIN = 3000;
+const CLIMB_LIFT = 3000;
 const DOTS_PER_EDGE = 3;
 /** Seconds for a dot to travel one edge. */
 const PERIOD = 3;
@@ -195,6 +199,25 @@ export class FlowScene {
       draw(new THREE.CubicBezierCurve3(a, a.clone().setY(a.y + lift), b.clone().setY(b.y - lift), b), color, bytes, ends);
     };
 
+    // Front edge of the focused floor: climbs from lower floors go up in front of it.
+    const front = Math.max(...placed.filter((p) => p.spec.floor === focusFloor).flatMap((p) => p.boxes.map((box) => box.cz + box.sz / 2)));
+
+    /**
+     * From a lower floor into an op above its output (RoPE from the cos / sin tables): leaves `a` heading up, climbs in
+     * front of the focused floor, turns in over it and drops into `b` from above, as same-floor inputs do. Rising
+     * straight into `b` from below would pass through the block the op produces.
+     */
+    const climb = (a: THREE.Vector3, b: THREE.Vector3, color: number, bytes: number, ends: Ends) => {
+      const z = front + CLIMB_MARGIN;
+      const top = b.y + CLIMB_LIFT;
+      const path = new THREE.CatmullRomCurve3([
+        a, a.clone().setY(a.y + 2000),
+        new THREE.Vector3(b.x, b.y - OP_HOVER - CLIMB_MARGIN, z), new THREE.Vector3(b.x, top, z),
+        new THREE.Vector3(b.x, top, b.z), b,
+      ], false, 'centripetal');
+      draw(path, color, bytes, ends);
+    };
+
     const label = (text: string, pos: THREE.Vector3, className: string, title = '') => {
       const div = document.createElement('div');
       div.className = className;
@@ -228,8 +251,10 @@ export class FlowScene {
         const color = carriesStream && p!.spec.residual ? RESIDUAL_COLOR : KIND_COLORS[p!.spec.kind].edge;
         const bytes = flowBytes(p!, sel, op.inputBytes?.[p!.spec.id]);
         const ends = { tensors: [p!.spec.id], label: div, text: `${p!.spec.label} → ${text}` };
-        // Inputs from a lower floor (RoPE tables), and inputs of an op that sits under a higher floor, rise into it.
-        if (p!.spec.floor < op.floor || crossFloor) riser(anchor(p!, sel), pos, color, bytes, ends);
+        // Inputs of an op that sits under a higher floor rise into it; inputs from a lower floor (RoPE tables, the
+        // causal mask) climb around the floor and come down into their op; the rest arc within the floor.
+        if (crossFloor) riser(anchor(p!, sel), pos, color, bytes, ends);
+        else if (p!.spec.floor < op.floor) climb(anchor(p!, sel), pos, color, bytes, ends);
         else arc(anchor(p!, sel), pos, color, bytes, ends);
       }
       const outColor = carriesStream ? RESIDUAL_COLOR : KIND_COLORS[out.spec.kind].edge;

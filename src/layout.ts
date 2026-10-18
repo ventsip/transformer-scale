@@ -19,8 +19,9 @@ export const THICKNESS_PER_BYTE = 64;
 
 /**
  * Floors above the focused one are lifted and floors below it lowered, opening space around it: at least
- * MIN_FOCUS_GAP, and enough for the deepest floor to stay clear of the one above when seen from the focus view
- * (which looks down at about atan(1.5), see frameFocus in main.ts).
+ * MIN_FOCUS_GAP, and enough for the focused floor to stay clear of the one above when seen from the focus view
+ * (which looks down at about atan(1.5), see frameFocus in main.ts). Only the focused floor's depth counts: the
+ * LM head floor is 128K deep (the vocabulary), which would push every layer's neighbors far away.
  */
 const MIN_FOCUS_GAP = 40000;
 const FOCUS_GAP_PER_DEPTH = 1.5;
@@ -194,7 +195,8 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
     }
     extent.set(p.spec.floor, e);
   }
-  const depth = Math.max(0, ...[...extent.values()].map((e) => e.max - e.min));
+  const focused = extent.get(o.focusFloor);
+  const depth = focused ? focused.max - focused.min : 0;
   const gap = Math.max(MIN_FOCUS_GAP, FOCUS_GAP_PER_DEPTH * depth);
   for (const p of placed) {
     const dy = Math.sign(p.spec.floor - o.focusFloor) * gap;
