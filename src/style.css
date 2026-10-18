@@ -1,10 +1,10 @@
 :root {
-  --bg: #0b0d12;
+  --bg: var(--c-background);
   --panel: rgba(17, 21, 29, 0.92);
   --border: #232a36;
   --text: #d6dce5;
   --muted: #8b95a5;
-  --accent: #9cc2ff;
+  --accent: var(--c-weight-edge);
   font: 12px/1.45 ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
   color: var(--text);
 }
@@ -35,7 +35,7 @@ body,
 }
 
 .floor-label.focused {
-  color: #fff;
+  color: var(--c-highlight);
   font-weight: 600;
 }
 
@@ -195,9 +195,9 @@ button:hover {
 
 .op-label {
   padding: 1px 7px;
-  color: #f1f5f9;
+  color: var(--c-neutral-100);
   background: rgba(15, 18, 25, 0.88);
-  border: 1px solid #64748b;
+  border: 1px solid var(--c-neutral-500);
   border-radius: 999px;
   font: 11px/1.4 ui-monospace, Consolas, monospace;
   white-space: nowrap;
@@ -206,7 +206,7 @@ button:hover {
 }
 
 .tt-head {
-  color: #e2e8f0;
+  color: var(--c-neutral-200);
 }
 
 button.play {
@@ -310,12 +310,12 @@ button.play {
 }
 
 .op-chart .grid {
-  stroke: #232a36;
+  stroke: var(--border);
   stroke-width: 1;
 }
 
 .op-chart .axis {
-  stroke: #475569;
+  stroke: var(--c-neutral-600);
   stroke-width: 1;
 }
 
@@ -325,12 +325,12 @@ button.play {
 }
 
 .op-chart .bar {
-  fill: #f5a524;
+  fill: var(--c-activation);
 }
 
 .op-chart .ghost {
   fill: none;
-  stroke: #94a3b8;
+  stroke: var(--c-neutral-400);
   stroke-width: 1;
 }
 
@@ -339,7 +339,7 @@ button.play {
 }
 
 .op-chart .hit:hover {
-  fill: rgba(148, 163, 184, 0.08);
+  fill: color-mix(in srgb, var(--c-neutral-400) 8%, transparent);
 }
 
 .op-chart-tip {
@@ -350,7 +350,7 @@ button.play {
   white-space: nowrap;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  background: #0b0d12;
+  background: var(--c-background);
   border: 1px solid var(--border);
   border-radius: 6px;
   pointer-events: none;
@@ -360,7 +360,7 @@ button.play {
   margin-top: 12px;
   padding: 8px 10px;
   color: var(--muted);
-  background: rgba(148, 163, 184, 0.06);
+  background: color-mix(in srgb, var(--c-neutral-400) 6%, transparent);
   border-radius: 8px;
 }
 
@@ -391,7 +391,7 @@ button.play {
 }
 
 .op-chart .bar.picked {
-  fill: #fde68a;
+  fill: var(--c-amber-200);
 }
 
 .op-chart .pick-mark {
@@ -408,25 +408,25 @@ button.play {
 /* Line charts (SiLU): the function in the activation color, a dashed gray reference, a crosshair on hover. */
 .op-chart .line {
   fill: none;
-  stroke: #f5a524;
+  stroke: var(--c-activation);
   stroke-width: 2;
 }
 
 .op-chart .ref {
   fill: none;
-  stroke: #94a3b8;
+  stroke: var(--c-neutral-400);
   stroke-width: 1.5;
   stroke-dasharray: 5 4;
 }
 
 .op-chart .marker {
-  fill: #f5a524;
+  fill: var(--c-activation);
   stroke: var(--bg);
   stroke-width: 2;
 }
 
 .op-chart .crosshair {
-  stroke: #64748b;
+  stroke: var(--c-neutral-500);
   stroke-width: 1;
 }
 
@@ -444,26 +444,26 @@ button.play {
   display: inline-block;
   width: 16px;
   height: 0;
-  border-top: 2px solid #f5a524;
+  border-top: 2px solid var(--c-activation);
 }
 
 .op-legend i.swatch-ref {
-  border-top: 2px dashed #94a3b8;
+  border-top: 2px dashed var(--c-neutral-400);
 }
 
 .op-chart .bar.weight {
-  fill: #4f8ff7;
+  fill: var(--c-weight);
 }
 
 /* RoPE dials: a reference ray at angle 0 and the rotated pair. */
 .op-chart .dial {
   fill: none;
-  stroke: #334155;
+  stroke: var(--c-neutral-700);
   stroke-width: 1;
 }
 
 .op-chart .hand {
-  stroke: #f5a524;
+  stroke: var(--c-activation);
   stroke-width: 2;
 }
 
@@ -474,7 +474,7 @@ button.play {
 }
 
 .op-chart .hatch {
-  stroke: #475569;
+  stroke: var(--c-neutral-600);
   stroke-width: 2;
 }
 
@@ -500,36 +500,36 @@ button.play {
 
 /* The op at the end of a hovered pipe. */
 .op-label.highlight {
-  color: #0b0d12;
-  background: #f8fafc;
-  border-color: #f8fafc;
+  color: var(--c-background);
+  background: var(--c-highlight);
+  border-color: var(--c-highlight);
 }
 
 /* Embedding lookup diagram. */
 .op-chart .table {
   fill: #1e3a5f;
-  stroke: #4f8ff7;
+  stroke: var(--c-weight);
   stroke-width: 1;
 }
 
 .op-chart .link {
   fill: none;
-  stroke: #475569;
+  stroke: var(--c-neutral-600);
   stroke-width: 1;
 }
 
 .op-chart .link.on {
-  stroke: #f5a524;
+  stroke: var(--c-activation);
   stroke-width: 2;
 }
 
 .op-chart .row {
-  stroke: #9cc2ff;
+  stroke: var(--c-weight-edge);
   stroke-width: 1;
 }
 
 .op-chart .row.on {
-  stroke: #f5a524;
+  stroke: var(--c-activation);
   stroke-width: 3;
 }
 
@@ -538,7 +538,7 @@ button.play {
 }
 
 .op-chart .xrow.on {
-  fill: #f5a524;
+  fill: var(--c-activation);
 }
 
 .op-chart .gap-mark {
@@ -547,7 +547,7 @@ button.play {
 }
 
 .op-chart .gap-line {
-  stroke: #64748b;
+  stroke: var(--c-neutral-500);
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }

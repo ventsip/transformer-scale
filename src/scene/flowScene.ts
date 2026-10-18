@@ -3,6 +3,7 @@ import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { boxBounds, type PlacedTensor } from '../layout';
 import { byteCount, onPath, type HeadSelection, type OpSpec, type Role } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
+import { PALETTE } from '../palette';
 import { hasViz, openOpPopup } from '../ui/opPopup';
 
 /** Height of operation nodes above the floor: they hover over the tensor they produce. */
@@ -31,13 +32,13 @@ const MAX_STEPS = 9;
 /** Smallest flow-dot radius, in width steps. */
 const DOT_MIN_STEPS = 1.5;
 /** Color of the residual stream: distinct from every tensor kind. */
-export const RESIDUAL_COLOR = 0x67e8f9;
+export const RESIDUAL_COLOR = PALETTE.residual;
 /** Color of the generation loop from the sampled token back to the input. */
-export const LOOP_COLOR = 0xf8fafc;
+export const LOOP_COLOR = PALETTE.loop;
 /** How far left of the building the generation loop runs. */
 const LOOP_MARGIN = 16384;
 /** The loop flashes this color on each decode step, fading over PULSE_MS. */
-const PULSE_COLOR = 0xfbbf24;
+const PULSE_COLOR = PALETTE.pulse;
 const PULSE_MS = 400;
 /** Tube segments: one per UNITS_PER_SEGMENT of length, within these bounds. */
 const MIN_SEGMENTS = 48;
@@ -131,7 +132,7 @@ export interface EdgeHit {
 
 /** Pipes within this many pixels of the pointer count as hovered: thin pipes are about a pixel wide. */
 const PICK_PIXELS = 6;
-const HOVER_COLOR = 0xffffff;
+const HOVER_COLOR = PALETTE.highlight;
 /**
  * Pipes are see-through, so blocks and other pipes behind them stay visible. They do not write depth, which keeps
  * overlapping pipes from hiding one another by draw order. The hovered pipe is drawn solid.

@@ -2,6 +2,7 @@ import { formatBytes, formatInt, formatPercent } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
+import { PALETTE, cssColor } from '../palette';
 import { gaussian, rng } from '../random';
 import { floorLayer, type Mode, type OpSpec, type OpViz, type VizStage } from '../model/tensors';
 
@@ -862,10 +863,12 @@ function mix(a: string, b: string, t: number): string {
   return `rgb(${ca.map((v, k) => Math.round(v + (cb[k] - v) * Math.max(0, Math.min(1, t)))).join(',')})`;
 }
 
+/** Scores of 0 in the heatmap: the chart's neutral. */
+const SCORE_ZERO = cssColor(PALETTE.neutral700);
 /** Diverging for scores: blue below 0, neutral gray at 0, orange above. */
-const scoreColor = (v: number, max: number) => (v < 0 ? mix('#334155', '#60a5fa', -v / max) : mix('#334155', '#f5a524', v / max));
+const scoreColor = (v: number, max: number) => (v < 0 ? mix(SCORE_ZERO, cssColor(PALETTE.blue400), -v / max) : mix(SCORE_ZERO, cssColor(PALETTE.activation), v / max));
 /** Sequential for probabilities: dark at 0, bright at the maximum. */
-const probColor = (p: number, max: number) => mix('#1e293b', '#fbbf24', Math.sqrt(p / max));
+const probColor = (p: number, max: number) => mix(cssColor(PALETTE.neutral800), cssColor(PALETTE.pulse), Math.sqrt(p / max));
 
 interface HeatmapDraw {
   value: (i: number, j: number) => number;

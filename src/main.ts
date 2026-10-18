@@ -4,6 +4,7 @@ import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer
 import { formatBytes, formatCount, formatFlops, formatInt, formatPercent } from './format';
 import { FOCUS_VIEW_SLOPE, STATION_GAP, THICKNESS_PER_BYTE, boxBounds, enclosingBox, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { MODELS, type ModelId } from './model/config';
+import { PALETTE, applyPalette, cssColor } from './palette';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
 import {
@@ -17,6 +18,7 @@ import { floorParts, type Part } from './model/sections';
 import { createControls, maxTokens, type Settings } from './ui/controls';
 import { setPopupContext } from './ui/opPopup';
 
+applyPalette();
 const params = new URLSearchParams(location.search);
 // ?model=mixtral-8x7b opens with that model.
 const initialModel = (params.get('model') ?? '') in MODELS ? (params.get('model') as ModelId) : 'llama-3-8b';
@@ -60,8 +62,8 @@ labelRenderer.domElement.className = 'labels';
 app.appendChild(labelRenderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0d12);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 1.6));
+scene.background = new THREE.Color(PALETTE.background);
+scene.add(new THREE.HemisphereLight(0xffffff, PALETTE.ground, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.8);
 sun.position.set(0.4, 1, 0.7);
 scene.add(sun);
@@ -364,7 +366,7 @@ const widthExamples = ([['8 KiB', 2 ** 13], ['16 MiB', 2 ** 24], ['1 GiB', 2 ** 
   .map(([name, bytes]) => `${name} ≈ ${formatInt(Math.round(pipeDiameter(bytes)))}`)
   .join(', ');
 const swatch = (hex: number, label: string) =>
-  `<span><i style="background:#${hex.toString(16).padStart(6, '0')}"></i>${label}</span>`;
+  `<span><i style="background:${cssColor(hex)}"></i>${label}</span>`;
 document.getElementById('legend')!.innerHTML = [
   swatch(KIND_COLORS.weight.fill, 'Weights'),
   swatch(KIND_COLORS.activation.fill, 'Transient activations'),
@@ -493,7 +495,7 @@ function showTooltip(p: Pick, e: PointerEvent) {
   const dims = s.dims.map((d) => `${d.name} ${formatInt(d.size)}`).join(' × ');
   tooltip.innerHTML = `
     <div class="tt-title">${s.label}</div>
-    <div class="tt-kind" style="color:#${KIND_COLORS[s.kind].edge.toString(16)}">${s.kind} · ${DTYPES[s.dtype].label} · ${floorName(cfg, s.floor)}</div>
+    <div class="tt-kind" style="color:${cssColor(KIND_COLORS[s.kind].edge)}">${s.kind} · ${DTYPES[s.dtype].label} · ${floorName(cfg, s.floor)}</div>
     <div>${dims}</div>
     <div><b>${formatCount(elementCount(s))}</b> elements · <b>${formatBytes(byteCount(s))}</b></div>
     ${headLine(p)}

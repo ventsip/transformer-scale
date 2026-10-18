@@ -1,20 +1,21 @@
 import * as THREE from 'three/webgpu';
 import { boxBounds, type Box, type PlacedTensor, type RowState } from '../layout';
 import { kvGroup, onPath, type HeadSelection, type Role, type TensorKind } from '../model/tensors';
+import { PALETTE } from '../palette';
 
 export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
-  weight: { fill: 0x4f8ff7, edge: 0x9cc2ff },
-  activation: { fill: 0xf5a524, edge: 0xffd27a },
-  kv: { fill: 0x22c55e, edge: 0x86efac },
-  scores: { fill: 0xef4444, edge: 0xf87171 },
-  buffer: { fill: 0xa78bfa, edge: 0xc4b5fd },
+  weight: { fill: PALETTE.weight, edge: PALETTE.weightEdge },
+  activation: { fill: PALETTE.activation, edge: PALETTE.activationEdge },
+  kv: { fill: PALETTE.kv, edge: PALETTE.kvEdge },
+  scores: { fill: PALETTE.scores, edge: PALETTE.scoresEdge },
+  buffer: { fill: PALETTE.buffer, edge: PALETTE.bufferEdge },
 };
 
 /** Color of the causally masked half of attention-score tiles. */
-export const MASKED_COLORS = { fill: 0x64748b, edge: 0x475569 };
+export const MASKED_COLORS = { fill: PALETTE.neutral500, edge: PALETTE.neutral600 };
 
 /** Colors of the Q, K and V projection weights (tint and outline). Hues used for nothing else. */
-export const ROLE_COLORS = { q: 0xe879f9, k: 0xfb923c, v: 0x2dd4bf } as const;
+export const ROLE_COLORS = { q: PALETTE.q, k: PALETTE.k, v: PALETTE.v } as const;
 
 /**
  * Which part of a box an instance covers. Causal tiles split along the diagonal: keys run along X and
@@ -104,7 +105,7 @@ export class TensorScene {
   /** Outlines of hovered boxes: one for a block, the tensor at the end of a pipe. Grown on demand. */
   private readonly highlights: THREE.LineSegments[] = [];
   private readonly highlightGeometry: THREE.EdgesGeometry;
-  private readonly highlightMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true });
+  private readonly highlightMaterial = new THREE.LineBasicMaterial({ color: PALETTE.highlight, depthTest: false, transparent: true });
   private focusFloor = -1;
   private selection: HeadSelection | null = null;
   private expertSelection: number | null = null;
@@ -185,7 +186,7 @@ export class TensorScene {
       if (this.selection && !onPath(split, head, this.selection)) out.multiplyScalar(OFF_PATH);
     }
     if (rows === 'reserved') out.multiplyScalar(RESERVED);
-    if (rows === 'fresh') out.lerp(this.groupColor.setHex(0xffffff), FRESH);
+    if (rows === 'fresh') out.lerp(this.groupColor.setHex(PALETTE.highlight), FRESH);
     if (item.spec.superseded) out.multiplyScalar(SUPERSEDED);
     if (item.spec.idle) out.multiplyScalar(IDLE);
     return out.multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);

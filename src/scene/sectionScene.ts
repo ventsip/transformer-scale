@@ -2,17 +2,18 @@ import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { boxBounds, type PlacedTensor } from '../layout';
 import type { Part, PartKind } from '../model/sections';
+import { PALETTE } from '../palette';
 
 /**
  * Muted tints per part: structure, not data, so far quieter than the tensor colors. Attention and the router lean
  * blue and teal, the MLP and experts warm, so the two halves of a layer tell apart at a glance.
  */
 const TINTS: Record<PartKind, number> = {
-  attention: 0x5b7bb5,
-  mlp: 0xa0785a,
-  router: 0x4f9a94,
-  experts: 0xa0785a,
-  expert: 0xc9a27a,
+  attention: PALETTE.trayAttention,
+  mlp: PALETTE.trayMlp,
+  router: PALETTE.trayRouter,
+  experts: PALETTE.trayMlp,
+  expert: PALETTE.trayExpert,
 };
 /** How far trays reach past their blocks, and how far below the floor they sit (experts' trays nest above theirs). */
 const MARGIN: Record<PartKind, number> = { attention: 1536, mlp: 1536, router: 1536, experts: 1536, expert: 512 };
@@ -93,7 +94,7 @@ export class SectionScene {
     this.hovered = tray;
     if (tray) {
       tray.fill.opacity = HOVER_OPACITY;
-      tray.edge.color.setHex(0xffffff);
+      tray.edge.color.setHex(PALETTE.highlight);
     }
   }
 
