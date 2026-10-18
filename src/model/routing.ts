@@ -1,3 +1,4 @@
+import { gaussian, rng } from '../random';
 import type { ModelConfig } from './config';
 
 /**
@@ -19,13 +20,6 @@ const IMBALANCE = 0.2;
 /** Chance that a token's first expert repeats the previous token's. */
 const STICKINESS = 0.25;
 
-function rng(seed: number) {
-  return () => {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    return seed / 2 ** 32;
-  };
-}
-
 const cache = new Map<ModelConfig, Routing>();
 
 export function routing(cfg: ModelConfig): Routing {
@@ -34,7 +28,7 @@ export function routing(cfg: ModelConfig): Routing {
   const { nExperts: E, topK: K } = cfg.moe!;
   const P = cfg.maxContext;
   const rand = rng(42);
-  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const normal = gaussian(rand);
   // choice[(layer * P + pos) * K + j]: the j-th expert of that token.
   const choice = new Uint8Array(cfg.nLayers * P * K);
   const weights = new Float64Array(E);

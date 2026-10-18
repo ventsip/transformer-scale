@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import type { PlacedTensor } from '../layout';
+import { boxBounds, type PlacedTensor } from '../layout';
 import { byteCount, onPath, type HeadSelection, type OpSpec, type Role } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 import { hasViz, openOpPopup } from '../ui/opPopup';
@@ -44,28 +44,19 @@ function bounds(p: PlacedTensor, sel: HeadSelection | null = null, role?: Role) 
   const onHead = sel && split ? p.boxes.filter((_, i) => onPath(split, p.heads[i]!, sel)) : p.boxes;
   // Only the part of a fused Q/K/V tensor an op reads.
   const boxes = role ? onHead.filter((b) => p.roles[p.boxes.indexOf(b)] === role) : onHead;
-  const b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, base: Infinity, top: -Infinity };
-  for (const box of boxes.length ? boxes : p.boxes) {
-    b.minX = Math.min(b.minX, box.cx - box.sx / 2);
-    b.maxX = Math.max(b.maxX, box.cx + box.sx / 2);
-    b.minZ = Math.min(b.minZ, box.cz - box.sz / 2);
-    b.maxZ = Math.max(b.maxZ, box.cz + box.sz / 2);
-    b.base = Math.min(b.base, box.cy - box.sy / 2);
-    b.top = Math.max(b.top, box.cy + box.sy / 2);
-  }
-  return b;
+  return boxBounds(boxes.length ? boxes : p.boxes);
 }
 
 /** Where edges attach to a tensor: the center of its top (or bottom) face, all tiles together. */
 function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'bottom' = 'top', role?: Role): THREE.Vector3 {
   const b = bounds(p, sel, role);
-  return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
+  return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.maxY : b.minY, (b.minZ + b.maxZ) / 2);
 }
 
 /** Hovering over the center of its output; when the output is on a higher floor, just below it instead. */
 function opPosition(op: OpSpec, out: PlacedTensor, sel: HeadSelection | null): THREE.Vector3 {
   const b = bounds(out, sel);
-  const y = out.spec.floor === op.floor ? b.top + OP_HOVER : b.base - OP_HOVER;
+  const y = out.spec.floor === op.floor ? b.maxY + OP_HOVER : b.minY - OP_HOVER;
   return new THREE.Vector3((b.minX + b.maxX) / 2, y, (b.minZ + b.maxZ) / 2);
 }
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import type { PlacedTensor } from '../layout';
+import { boxBounds, type PlacedTensor } from '../layout';
 import type { Part, PartKind } from '../model/sections';
 
 /**
@@ -48,11 +48,9 @@ export class SectionScene {
       const boxes = part.tensorIds.flatMap((id) => byId.get(id)?.boxes ?? []);
       if (boxes.length === 0) continue;
       const m = MARGIN[part.kind];
-      const minX = Math.min(...boxes.map((b) => b.cx - b.sx / 2)) - m;
-      const maxX = Math.max(...boxes.map((b) => b.cx + b.sx / 2)) + m;
-      const minZ = Math.min(...boxes.map((b) => b.cz - b.sz / 2)) - m;
-      const maxZ = Math.max(...boxes.map((b) => b.cz + b.sz / 2)) + m;
-      const top = Math.min(...boxes.map((b) => b.cy - b.sy / 2)) - DEPTH[part.kind];
+      const b = boxBounds(boxes);
+      const [minX, maxX, minZ, maxZ] = [b.minX - m, b.maxX + m, b.minZ - m, b.maxZ + m];
+      const top = b.minY - DEPTH[part.kind];
       const opacity = part.idle ? IDLE_OPACITY : FILL_OPACITY;
       const fill = new THREE.MeshBasicMaterial({ color: TINTS[part.kind], transparent: true, opacity, depthWrite: false });
       const edge = new THREE.LineBasicMaterial({ color: TINTS[part.kind], transparent: true, opacity: part.idle ? 0.3 : 0.7 });

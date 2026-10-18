@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import type { Box, PlacedTensor, RowState } from '../layout';
+import { boxBounds, type Box, type PlacedTensor, type RowState } from '../layout';
 import { kvGroup, onPath, type HeadSelection, type Role, type TensorKind } from '../model/tensors';
 
 export const KIND_COLORS: Record<TensorKind, { fill: number; edge: number }> = {
@@ -229,11 +229,7 @@ export class TensorScene {
         if (!role) continue;
         const boxes = item.boxes.filter((_, i) => item.roles[i] === role);
         color.setHex(ROLE_COLORS[role]).multiplyScalar(item.spec.floor === this.focusFloor ? 1 : OTHER_FLOOR);
-        const b = {
-          minX: Math.min(...boxes.map((x) => x.cx - x.sx / 2)), maxX: Math.max(...boxes.map((x) => x.cx + x.sx / 2)),
-          minY: Math.min(...boxes.map((x) => x.cy - x.sy / 2)), maxY: Math.max(...boxes.map((x) => x.cy + x.sy / 2)),
-          minZ: Math.min(...boxes.map((x) => x.cz - x.sz / 2)), maxZ: Math.max(...boxes.map((x) => x.cz + x.sz / 2)),
-        };
+        const b = boxBounds(boxes);
         for (const [x, y, z] of BOX_OUTLINE) {
           positions.push(x < 0 ? b.minX : b.maxX, y < 0 ? b.minY : b.maxY, z < 0 ? b.minZ : b.maxZ);
           colors.push(color.r, color.g, color.b);

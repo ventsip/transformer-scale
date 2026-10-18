@@ -1,7 +1,8 @@
-import { formatBytes } from '../format';
+import { formatBytes, formatInt, formatPercent } from '../format';
 import { LLAMA_3_8B, type ModelConfig } from '../model/config';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
+import { gaussian, rng } from '../random';
 import type { Mode, OpSpec } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
@@ -162,13 +163,6 @@ function stageSection(body: HTMLElement, focused: boolean, title: string, text: 
 
 const SHOWN = 40;
 
-/** Deterministic pseudo-random numbers, so the illustration is the same every time. */
-function rng(seed: number) {
-  return () => {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    return seed / 2 ** 32;
-  };
-}
 
 /**
  * Illustrative last-position logits: 60 candidates falling from about 18 to about 0, steeply at first and
@@ -177,7 +171,7 @@ function rng(seed: number) {
  */
 function illustrativeLogits(): Float64Array {
   const rand = rng(7);
-  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const normal = gaussian(rand);
   const logits = new Float64Array(model.vocabSize);
   for (let r = 0; r < model.vocabSize; r++) {
     logits[r] = r < 60 ? 18 - 14 * Math.log(1 + r / 15) + 0.6 * normal() : -8 + 2 * normal();
@@ -223,7 +217,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   };
 
   // 1. Logits.
-  const sLogits = section('logits', 'logits (fp32)', `The LM head scores every token in the vocabulary. Illustrative values; the top ${SHOWN} of ${model.vocabSize.toLocaleString('en-US')} shown, by rank.`);
+  const sLogits = section('logits', 'logits (fp32)', `The LM head scores every token in the vocabulary. Illustrative values; the top ${SHOWN} of ${formatInt(model.vocabSize)} shown, by rank.`);
   const cLogits = barChart();
   sLogits.append(cLogits.root);
 
@@ -260,8 +254,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   let picked: number | null = null;
   let probs: Float64Array = new Float64Array(0);
 
-  const pct = (x: number) => `${(100 * x).toPrecision(x < 0.1 ? 2 : 3)}%`;
-  const int = (n: number) => n.toLocaleString('en-US');
+  const pct = (x: number) => formatPercent(x, x < 0.1 ? 2 : 3);
 
   function update() {
     const t = Number(temp.input.value);
@@ -281,10 +274,10 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
     const V = model.vocabSize;
     const rest = V - SHOWN;
     const withGap = <T>(xs: T[], fill: T) => [...xs, ...Array<T>(GAP_COLUMNS).fill(fill)];
-    const ranks = `ranks ${int(SHOWN + 1)}–${int(V)}: ${int(rest)} more tokens`;
+    const ranks = `ranks ${formatInt(SHOWN + 1)}–${formatInt(V)}: ${formatInt(rest)} more tokens`;
     const axis = {
       gap: { at: SHOWN, columns: GAP_COLUMNS }, ticks: [0, 9, 19, 29, SHOWN + 1],
-      tickLabel: (i: number) => (i >= SHOWN ? `+${int(rest)}` : `#${i + 1}`),
+      tickLabel: (i: number) => (i >= SHOWN ? `+${formatInt(rest)}` : `#${i + 1}`),
     };
     const range = (xs: Float64Array) => `from ${xs[SHOWN].toFixed(1)} down to ${xs[V - 1].toFixed(1)}`;
     cLogits.draw({
@@ -300,7 +293,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
     cFilter.draw({
       values: withGap(scaledShown, 0), removed: withGap(scaledShown.map((_, i) => i >= kept), true), lo: sLo, hi: sHi, ...axis,
       describe: (i) => (i >= SHOWN
-        ? `${ranks}: ${kept > SHOWN ? `${int(kept - SHOWN)} kept, the rest` : 'all'} removed → −∞`
+        ? `${ranks}: ${kept > SHOWN ? `${formatInt(kept - SHOWN)} kept, the rest` : 'all'} removed → −∞`
         : i < kept ? `#${i + 1} · kept · ${scaledShown[i].toFixed(2)}` : `#${i + 1} · removed → −∞`),
     });
     const shownProbs = scaledShown.map((_, i) => (i < kept ? probs[i] : 0));
@@ -311,13 +304,13 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
     });
 
     filterFacts.innerHTML =
-      `Top-k keeps <b>${int(afterK)}</b> of ${int(model.vocabSize)} tokens; top-p then keeps <b>${int(kept)}</b>` +
+      `Top-k keeps <b>${formatInt(afterK)}</b> of ${formatInt(model.vocabSize)} tokens; top-p then keeps <b>${formatInt(kept)}</b>` +
       (kept > SHOWN ? ` (only the first ${SHOWN} are shown).` : '.');
     let cum = 0;
     let for90 = 0;
     while (for90 < kept && cum < 0.9) cum += probs[for90++];
     softFacts.innerHTML =
-      `The top token gets <b>${pct(probs[0])}</b>; <b>${int(for90)}</b> ${for90 === 1 ? 'token makes' : 'tokens make'} up 90% of the probability.`;
+      `The top token gets <b>${pct(probs[0])}</b>; <b>${formatInt(for90)}</b> ${for90 === 1 ? 'token makes' : 'tokens make'} up 90% of the probability.`;
     sampleOut.innerHTML = picked === null
       ? 'Not sampled yet.'
       : `Sampled token <b>#${picked + 1}</b>, which had probability <b>${pct(probs[picked])}</b>.`;
@@ -371,7 +364,7 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
   const sGate = stageSection(body, focus === 'gate', 'a = SiLU(g) ⊙ u',
     `Two projections of the same input: the gate g = x · W_gate and the up projection u = x · W_up. ` +
     `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for one token, from both ends of its ` +
-    `${model.dFfn.toLocaleString('en-US')} d_ffn features, all on one scale.`);
+    `${formatInt(model.dFfn)} d_ffn features, all on one scale.`);
   const resample = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
   row.append(resample);
@@ -384,7 +377,7 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
   let seed = 11;
   function update() {
     const rand = rng(seed);
-    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const normal = gaussian(rand);
     // Whole d_ffn vectors; the charts show both ends of them.
     const gFull = Array.from({ length: model.dFfn }, () => 1.6 * normal());
     const uFull = Array.from({ length: model.dFfn }, () => normal());
@@ -398,14 +391,14 @@ function swigluViz(body: HTMLElement, focus: GluStage): void {
     const hi = Math.max(...all);
     const f = (v: number) => v.toFixed(2);
     const axis = { lo, hi, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
-    const feature = (i: number) => `feature ${ends.index(i).toLocaleString('en-US')}`;
+    const feature = (i: number) => `feature ${formatInt(ends.index(i))}`;
     const describe = (text: (i: number) => string) => (i: number) => (ends.inGap(i) ? ends.gapText('features') : `${feature(i)} · ${text(i)}`);
     cGate.draw({ values: sg, ghost: g, ...axis, describe: describe((i) => `g = ${f(g[i])} → SiLU(g) = ${f(sg[i])}`) });
     cUp.draw({ values: u, ...axis, describe: describe((i) => `u = ${f(u[i])}`) });
     cOut.draw({ values: a, ghost: u, ...axis, describe: describe((i) => `${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`) });
     const closed = gFull.filter((v) => v < 0).length;
     facts.innerHTML =
-      `<b>${closed.toLocaleString('en-US')}</b> of ${model.dFfn.toLocaleString('en-US')} gates are negative: ` +
+      `<b>${formatInt(closed)}</b> of ${formatInt(model.dFfn)} gates are negative: ` +
       `SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
       `so those features of u barely pass (and flip sign slightly). Positive gates pass u scaled by about g. ` +
       'Cheap in FLOPs, but g, u and a are each a full T × d_ffn tensor, several times wider than the residual stream.';
@@ -540,7 +533,7 @@ const DIAL_PAIRS = [0, 4, 8, 16, 24, 32, 48, 63];
 function tokens(n: number): string {
   if (n >= 1e6) return `${+(n / 1e6).toPrecision(2)}M`;
   if (n >= 1e4) return `${+(n / 1e3).toPrecision(3)}K`;
-  return n >= 100 || Number.isInteger(n) ? Math.round(n).toLocaleString('en-US') : n.toPrecision(2);
+  return n >= 100 || Number.isInteger(n) ? formatInt(Math.round(n)) : n.toPrecision(2);
 }
 
 function ropeViz(body: HTMLElement, focus: RopeStage): void {
@@ -553,7 +546,7 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   // 1. Frequencies.
   const sFreq = stageSection(body, focus === 'freq', 'θ_i: one frequency per dimension pair',
     `Each head's ${model.headDim} dimensions form ${pairs} pairs; pair i rotates by θ_i = ` +
-    `${base.toLocaleString('en-US')}^(−2i/${model.headDim}) radians per token. ` +
+    `${formatInt(base)}^(−2i/${model.headDim}) radians per token. ` +
     `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice to fill head_dim.`);
   const cFreq = barChart('wavelength 2π/θ_i in tokens (log scale), by pair', 'line: context length');
   const fFreq = el('div', { className: 'op-popup-facts' });
@@ -562,13 +555,13 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   cFreq.draw({
     values: logLambda, lo: 0, hi: Math.max(...logLambda, Math.log10(ctx)) * 1.05,
     ticks: [0, 16, 32, 48, pairs - 1], tickLabel: String, yTick: (v) => tokens(10 ** v),
-    refs: [{ value: Math.log10(ctx), label: `context ${ctx.toLocaleString('en-US')}`, start: true }],
+    refs: [{ value: Math.log10(ctx), label: `context ${formatInt(ctx)}`, start: true }],
     describe: (i) => `pair ${i} · θ = ${theta[i].toPrecision(3)} rad/token · one turn every ${tokens(wavelength[i])} tokens`,
   });
   const slow = wavelength.filter((l) => l > ctx).length;
   fFreq.innerHTML =
     `Wavelengths run from <b>${tokens(wavelength[0])}</b> to <b>${tokens(wavelength[pairs - 1])}</b> tokens. ` +
-    `<b>${slow}</b> of ${pairs} pairs turn less than once within the ${ctx.toLocaleString('en-US')}-token context: ` +
+    `<b>${slow}</b> of ${pairs} pairs turn less than once within the ${formatInt(ctx)}-token context: ` +
     'fast pairs tell neighbors apart, slow pairs carry coarse, long-range position.';
 
   // 2. Rotation by position.
@@ -588,7 +581,7 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
 
   function drawDials() {
     const p = Math.round(2 ** (Number(pos.value) / 100)) - 1;
-    posShown.textContent = p.toLocaleString('en-US');
+    posShown.textContent = formatInt(p);
     dials.replaceChildren();
     DIAL_PAIRS.filter((i) => i < pairs).forEach((i, k) => {
       const cx = 70 + (k % 4) * 140;
@@ -604,11 +597,11 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
       const label = svg('text', { x: cx, y: cy + r + 16, class: 'tick', 'text-anchor': 'middle' });
       label.textContent = `pair ${i} · λ ${tokens(wavelength[i])}`;
       const sub = svg('text', { x: cx, y: cy + r + 28, class: 'tick', 'text-anchor': 'middle' });
-      sub.textContent = turns >= 1 ? `${turns >= 100 ? Math.round(turns).toLocaleString('en-US') : turns.toFixed(1)} turns` : `${((angle * 180) / Math.PI).toFixed(1)}°`;
+      sub.textContent = turns >= 1 ? `${turns >= 100 ? formatInt(Math.round(turns)) : turns.toFixed(1)} turns` : `${((angle * 180) / Math.PI).toFixed(1)}°`;
       dials.append(label, sub);
     });
     fRot.innerHTML =
-      `At position <b>${p.toLocaleString('en-US')}</b>, pair 0 has turned <b>${tokens(p * theta[0] / (2 * Math.PI))}</b> times ` +
+      `At position <b>${formatInt(p)}</b>, pair 0 has turned <b>${tokens(p * theta[0] / (2 * Math.PI))}</b> times ` +
       `and pair ${pairs - 1} by <b>${((p * theta[pairs - 1] * 180) / Math.PI).toFixed(2)}°</b>. ` +
       'K is cached after rotation, so each cached row already carries its position.';
   }
@@ -628,7 +621,7 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
     f: score,
     snap: Math.round,
     samples: 1600,
-    describe: (d) => `distance ${d.toLocaleString('en-US')} · score ${score(d).toFixed(3)}`,
+    describe: (d) => `distance ${formatInt(d)} · score ${score(d).toFixed(3)}`,
   }));
   const fRel = el('div', { className: 'op-popup-facts' });
   fRel.innerHTML =
@@ -655,7 +648,7 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
 
   // 1. Router.
   const sRouter = stageSection(body, focus === 'router', `Router: softmax, top-${K}, renormalize`,
-    `A ${model.dModel.toLocaleString('en-US')} × ${E} weight scores the ${E} experts for each token; softmax (in fp32) turns the ` +
+    `A ${formatInt(model.dModel)} × ${E} weight scores the ${E} experts for each token; softmax (in fp32) turns the ` +
     `scores into probabilities, the top ${K} are kept, and their probabilities are rescaled to sum to 1. Illustrative scores for one token.`);
   const another = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
@@ -681,20 +674,20 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   cCounts.draw({
     values: counts, lo: 0, hi: Math.max(...counts, even) * 1.1, ticks: expertIds, tickLabel: expertTick,
     refs: decode ? [] : [{ value: even, label: 'even' }], removed: counts.map((c) => c === 0),
-    describe: (e) => (counts[e] ? `E${e} · ${counts[e].toLocaleString('en-US')} tokens` : `E${e} · idle: its weights are not read`),
+    describe: (e) => (counts[e] ? `E${e} · ${formatInt(counts[e])} tokens` : `E${e} · idle: its weights are not read`),
   });
   const used = expertIds.filter((e) => counts[e] > 0);
   fDispatch.innerHTML = decode
     ? `The new token goes to experts <b>${used.join('</b> and <b>')}</b>; the other ${E - used.length} stay idle, so this ` +
       `layer reads only <b>${used.length}</b> of ${E} experts' weights. Generate to watch the pair change token by token.`
-    : `${K} × ${n.toLocaleString('en-US')} = <b>${(K * n).toLocaleString('en-US')}</b> token slots; the busiest expert gets ` +
-      `<b>${Math.max(...counts).toLocaleString('en-US')}</b> (${(Math.max(...counts) / even).toFixed(2)}× its even share) and the quietest ` +
-      `<b>${Math.min(...counts).toLocaleString('en-US')}</b>. HF's loop drops no tokens; training adds a load-balancing loss to keep this even.`;
+    : `${K} × ${formatInt(n)} = <b>${formatInt(K * n)}</b> token slots; the busiest expert gets ` +
+      `<b>${formatInt(Math.max(...counts))}</b> (${(Math.max(...counts) / even).toFixed(2)}× its even share) and the quietest ` +
+      `<b>${formatInt(Math.min(...counts))}</b>. HF's loop drops no tokens; training adds a load-balancing loss to keep this even.`;
 
   // 3. Combine.
   const sCombine = stageSection(body, focus === 'combine', 'Combine: m = Σ weight × expert output',
     `Each expert's output rows are scaled by their routing weights and added back at their tokens' positions (index_add_). ` +
-    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above, from both ends of their ${model.dModel.toLocaleString('en-US')} features.`);
+    `Every row of m receives exactly ${K} contributions. Illustrative outputs for the token above, from both ends of their ${formatInt(model.dModel)} features.`);
   const cParts = Array.from({ length: K }, () => barChart('', ''));
   const cSum = barChart('m: the sum', 'outlines: the first expert alone');
   sCombine.append(...cParts.map((c) => c.root), cSum.root);
@@ -702,7 +695,7 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
   let seed = 21;
   function update() {
     const rand = rng(seed);
-    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const normal = gaussian(rand);
     const logits = expertIds.map(() => 1.2 * normal());
     const m = Math.max(...logits);
     const exp = logits.map((v) => Math.exp(v - m));
@@ -727,7 +720,7 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
     fRouter.innerHTML =
       `This token goes to <b>E${top.join('</b> and <b>E')}</b>. Together they had <b>${pct(kept)}</b> of the probability; ` +
       `after rescaling their weights are <b>${top.map((e) => pct(weights[e])).join('</b> and <b>')}</b>. ` +
-      `The router is ${(model.dModel * E).toLocaleString('en-US')} parameters per layer, against ` +
+      `The router is ${formatInt(model.dModel * E)} parameters per layer, against ` +
       `${(3 * model.dModel * model.dFfn / 1e6).toFixed(0)}M in each expert.`;
 
     // Illustrative expert outputs (different experts, different vectors), whole d_model rows shown by both ends.
@@ -741,7 +734,7 @@ function moeViz(body: HTMLElement, focus: MoeStage, layer: number): void {
     const all = [...outputs.flat(), ...parts.flat(), ...total];
     const axis = { lo: Math.min(...all), hi: Math.max(...all), gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
     const describe = (text: (i: number) => string) => (i: number) =>
-      (ends.inGap(i) ? ends.gapText('features') : `feature ${ends.index(i).toLocaleString('en-US')} · ${text(i)}`);
+      (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${text(i)}`);
     parts.forEach((p, k) => {
       const e = top[k];
       cParts[k].root.querySelector('figcaption')?.remove();
@@ -793,7 +786,7 @@ function lookupViz(body: HTMLElement): void {
 
   // 1. Token ids → rows → x.
   const sRows = stageSection(body, true, 'Token ids select rows of embed_tokens',
-    `The table has one row of ${model.dModel.toLocaleString('en-US')} numbers per vocabulary entry (${V.toLocaleString('en-US')} rows). ` +
+    `The table has one row of ${formatInt(model.dModel)} numbers per vocabulary entry (${formatInt(V)} rows). ` +
     "Each token id picks its row, which is copied into x: no multiplication, just indexing. Hover a token to follow it.");
   const W = 560;
   const rowH = 22;
@@ -808,7 +801,7 @@ function lookupViz(body: HTMLElement): void {
 
   // 2. The selected row.
   const sRow = stageSection(body, false, 'One row: a token\'s embedding',
-    `Illustrative values from both ends of the ${model.dModel.toLocaleString('en-US')} features. Learned in training; ` +
+    `Illustrative values from both ends of the ${formatInt(model.dModel)} features. Learned in training; ` +
     'the same token always gets the same row, whatever its position (RoPE adds position later, inside attention).');
   const cRow = barChart('', '', 'weight');
   sRow.append(cRow.root);
@@ -821,7 +814,7 @@ function lookupViz(body: HTMLElement): void {
   const tableBytes = V * rowBytes;
   const rows = pass.mode === 'decode' ? 1 : pass.T;
   fCost.innerHTML =
-    `In this pass: <b>${rows.toLocaleString('en-US')}</b> ${rows === 1 ? 'row' : 'rows'} × ${formatBytes(rowBytes)} = ` +
+    `In this pass: <b>${formatInt(rows)}</b> ${rows === 1 ? 'row' : 'rows'} × ${formatBytes(rowBytes)} = ` +
     `<b>${formatBytes(rows * rowBytes)}</b> read from a <b>${formatBytes(tableBytes)}</b> table ` +
     `(${((100 * rows * rowBytes) / tableBytes).toPrecision(2)}%), and <b>0</b> FLOPs. ` +
     (model.arch === 'gpt2'
@@ -841,13 +834,13 @@ function lookupViz(body: HTMLElement): void {
       diagram.append(t);
     };
     heading(4, 'tokens and ids');
-    heading(table.x + table.w / 2, `embed_tokens: ${V.toLocaleString('en-US')} rows`, 'middle');
+    heading(table.x + table.w / 2, `embed_tokens: ${formatInt(V)} rows`, 'middle');
     heading(W - 4, 'x: one row per token', 'end');
     diagram.append(svg('rect', { x: table.x, y: table.y, width: table.w, height: table.h, rx: 3, class: 'table' }));
     const zero = svg('text', { x: table.x + table.w + 4, y: table.y + 8, class: 'tick' });
     zero.textContent = '0';
     const last = svg('text', { x: table.x + table.w + 4, y: table.y + table.h, class: 'tick' });
-    last.textContent = (V - 1).toLocaleString('en-US');
+    last.textContent = formatInt(V - 1);
     diagram.append(zero, last);
 
     // Unselected first, so the selected path is drawn on top.
@@ -864,7 +857,7 @@ function lookupViz(body: HTMLElement): void {
       const label = svg('text', { x: 4, y: y + 4, class: on ? 'tick selected' : 'tick' });
       label.textContent = text.length > 17 ? `${text.slice(0, 16)}…` : text;
       const idText = svg('text', { x: 146, y: y + 4, class: on ? 'tick selected' : 'tick', 'text-anchor': 'end' });
-      idText.textContent = id.toLocaleString('en-US');
+      idText.textContent = formatInt(id);
       diagram.append(label, idText);
       diagram.append(svg('rect', { x: 420, y: y - 6, width: W - 424, height: 12, rx: 2, class: on ? 'xrow on' : 'xrow' }));
       const hit = svg('rect', { x: 0, y: y - rowH / 2, width: W, height: rowH, class: 'hit' });
@@ -883,26 +876,26 @@ function lookupViz(body: HTMLElement): void {
     const same = toks.filter((t) => t.id === id).length;
     const unique = new Set(toks.map((t) => t.id)).size;
     fRows.innerHTML =
-      `<b>${text.replace(/</g, '&lt;')}</b> is id <b>${id.toLocaleString('en-US')}</b>` +
+      `<b>${text.replace(/</g, '&lt;')}</b> is id <b>${formatInt(id)}</b>` +
       (same > 1 ? `; it appears ${same === 2 ? 'twice' : `${same} times`}, and each copy reads the same row.` : '.') +
       ` These ${n} tokens read <b>${unique}</b> distinct rows. "The" and "the" are different tokens.` +
       ' Ids other than the first are illustrative.';
     const rand = rng(id);
-    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const normal = gaussian(rand);
     // The whole row (embedding entries are small numbers, a few hundredths); the chart shows both ends of it.
     const row = Array.from({ length: model.dModel }, () => 0.02 * normal());
     const ends = bothEnds(model.dModel, ROW_HEAD, ROW_TAIL, [0, 16, 32]);
     const values = ends.values((f) => row[f]);
     const span = Math.max(...values.map(Math.abs));
     cRow.root.querySelector('figcaption')?.remove();
-    const caption = el('figcaption', { textContent: `row ${id.toLocaleString('en-US')} (${text})` });
+    const caption = el('figcaption', { textContent: `row ${formatInt(id)} (${text})` });
     caption.append(el('span', {
-      textContent: `all ${model.dModel.toLocaleString('en-US')} features: the first ${ROW_HEAD}, … ${ends.hidden.toLocaleString('en-US')} more …, the last ${ROW_TAIL}`,
+      textContent: `all ${formatInt(model.dModel)} features: the first ${ROW_HEAD}, … ${formatInt(ends.hidden)} more …, the last ${ROW_TAIL}`,
     }));
     cRow.root.prepend(caption);
     cRow.draw({
       values, lo: -span, hi: span, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel,
-      describe: (i) => (ends.inGap(i) ? ends.gapText('features') : `feature ${ends.index(i).toLocaleString('en-US')} · ${values[i].toFixed(4)}`),
+      describe: (i) => (ends.inGap(i) ? ends.gapText('features') : `feature ${formatInt(ends.index(i))} · ${values[i].toFixed(4)}`),
     });
   }
   update();
@@ -922,7 +915,7 @@ const tokenHtml = (i: number) => ATTN_TOKENS[i].replace(/</g, '&lt;').replace(/>
  */
 function illustrativeScores(): number[][] {
   const rand = rng(3);
-  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const normal = gaussian(rand);
   const links: Record<string, number> = { '8,2': 4.5, '10,2': 3, '9,8': 2, '3,2': 2, '6,4': 1.5, '11,10': 1, '7,3': 1.2 };
   return ATTN_TOKENS.map((_, i) => ATTN_TOKENS.map((_, j) =>
     0.6 * normal() + (j === 0 ? 3 : 0) + (j === i ? 1 : 0) + (j === i - 1 ? 1.5 : 0) + (links[`${i},${j}`] ?? 0)));
@@ -1064,9 +1057,9 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
   const decode = pass.mode === 'decode';
   const scoreBytes = model.nHeads * (decode ? T + 1 : T * T) * 2;
   fCost.innerHTML = decode
-    ? `In this decode step the grid is a single row: the new token (position ${T.toLocaleString('en-US')}) against all ` +
-      `<b>${(T + 1).toLocaleString('en-US')}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`
-    : `At T = <b>${T.toLocaleString('en-US')}</b> each head's grid is ${T.toLocaleString('en-US')} × ${T.toLocaleString('en-US')}: ` +
+    ? `In this decode step the grid is a single row: the new token (position ${formatInt(T)}) against all ` +
+      `<b>${formatInt(T + 1)}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`
+    : `At T = <b>${formatInt(T)}</b> each head's grid is ${formatInt(T)} × ${formatInt(T)}: ` +
       `<b>${formatBytes(scoreBytes)}</b> per layer for ${model.nHeads} heads in bf16, and eager attention allocates it several times ` +
       '(scores, masked, fp32 softmax, cast). Fused kernels (FlashAttention / SDPA) never write it: they stream key blocks ' +
       'and keep a running softmax. ' +
@@ -1138,7 +1131,7 @@ const OUTLIERS: [number, number][] = [[11, 14], [40, -9]];
 
 function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   const rand = rng(5);
-  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const normal = gaussian(rand);
   const base = Array.from({ length: NORM_FEATURES }, () => 0.8 * normal());
   for (const [i, v] of OUTLIERS) base[i] = v;
   // Learned scales: illustrative, mostly 0.2–0.6, smaller on the outlier features.
@@ -1177,7 +1170,7 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   const ticks = [0, 16, 32, 48, NORM_FEATURES - 1];
   const tickLabel = (i: number) => String(i);
   const f = (v: number) =>
-    Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-US') : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
+    Math.abs(v) >= 1000 ? formatInt(Math.round(v)) : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
   const extent = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max(0, ...vs) });
 
   function update() {
@@ -1388,7 +1381,6 @@ function bothEnds(length: number, head: number, tail: number, headTicks: number[
   /** The vector index a (non-gap) column shows. */
   const index = (i: number) => (i < head ? i : length - (cols - i));
   const hidden = length - head - tail;
-  const int = (n: number) => n.toLocaleString('en-US');
   return {
     cols,
     inGap,
@@ -1396,10 +1388,10 @@ function bothEnds(length: number, head: number, tail: number, headTicks: number[
     hidden,
     gap: { at: head, columns: GAP_COLUMNS },
     ticks: [...headTicks, head + Math.floor(GAP_COLUMNS / 2), cols - 1],
-    tickLabel: (i: number) => (inGap(i) ? `+${int(hidden)}` : int(index(i))),
+    tickLabel: (i: number) => (inGap(i) ? `+${formatInt(hidden)}` : formatInt(index(i))),
     /** The columns' values from a function of the vector index; the gap gets 0 (it draws no bars). */
     values: (f: (index: number) => number) => Array.from({ length: cols }, (_, i) => (inGap(i) ? 0 : f(index(i)))),
-    gapText: (what: string) => `${what} ${int(head)}–${int(length - tail - 1)}: ${int(hidden)} not shown`,
+    gapText: (what: string) => `${what} ${formatInt(head)}–${formatInt(length - tail - 1)}: ${formatInt(hidden)} not shown`,
   };
 }
 

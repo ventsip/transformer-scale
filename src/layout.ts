@@ -72,6 +72,56 @@ export interface PlacedTensor {
   busZ: number;
 }
 
+/** Extent of a set of boxes. */
+export function boxBounds(boxes: readonly Box[]) {
+  const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+  for (const box of boxes) {
+    b.minX = Math.min(b.minX, box.cx - box.sx / 2);
+    b.maxX = Math.max(b.maxX, box.cx + box.sx / 2);
+    b.minY = Math.min(b.minY, box.cy - box.sy / 2);
+    b.maxY = Math.max(b.maxY, box.cy + box.sy / 2);
+    b.minZ = Math.min(b.minZ, box.cz - box.sz / 2);
+    b.maxZ = Math.max(b.maxZ, box.cz + box.sz / 2);
+  }
+  return b;
+}
+
+/** The single box enclosing a set of boxes. */
+export function enclosingBox(boxes: readonly Box[]): Box {
+  const b = boxBounds(boxes);
+  return {
+    cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, cz: (b.minZ + b.maxZ) / 2,
+    sx: b.maxX - b.minX, sy: b.maxY - b.minY, sz: b.maxZ - b.minZ,
+  };
+}
+
+/** A box of a placed tensor and what it stands for. */
+interface Cell {
+  box: Box;
+  head: number | null;
+  row: RowState;
+  role: Role | null;
+  expert: number | null;
+}
+
+/** The order of a fused Q/K/V projection's thirds. */
+const FUSED_ROLES: readonly Role[] = ['q', 'k', 'v'];
+
+type Slice = { from: number; to: number; patch: Partial<Omit<Cell, 'box'>> };
+
+/** `count` equal slices, the k-th with the attributes `patch(k)`. */
+const evenly = (count: number, patch: (k: number) => Slice['patch']): Slice[] =>
+  Array.from({ length: count }, (_, k) => ({ from: k / count, to: (k + 1) / count, patch: patch(k) }));
+
+/** Cuts each cell along `axis` into `slices` (fractions of its size), each part taking the slice's attributes. */
+function sliceCells(cells: Cell[], axis: 'x' | 'z', slices: Slice[]): Cell[] {
+  const [c, size] = axis === 'x' ? (['cx', 'sx'] as const) : (['cz', 'sz'] as const);
+  return cells.flatMap((cell) => slices.map(({ from, to, patch }) => ({
+    ...cell, ...patch,
+    box: { ...cell.box, [c]: cell.box[c] - cell.box[size] / 2 + ((from + to) / 2) * cell.box[size], [size]: (to - from) * cell.box[size] },
+  })));
+}
+
 function tiling(s: TensorSpec) {
   const cols = Math.min(s.tiles, TILE_COLS);
   const rows = Math.ceil(s.tiles / cols);
@@ -145,79 +195,42 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
           width = Math.max(width, xOffset + t.width, s.reserveWidth ?? 0);
           minZ = Math.min(minZ, zMin);
           maxZ = Math.max(maxZ, zMin + t.depth, ROW_GAP / 2 + (s.reserveFront ?? 0));
-          const boxes: Box[] = [];
-          const heads: (number | null)[] = [];
-          for (let i = 0; i < s.tiles; i++) {
+          // One cell per tile, then sliced: into heads, cache rows, fused Q/K/V thirds, router columns.
+          let cells: Cell[] = Array.from({ length: s.tiles }, (_, i) => {
             const minX = x0 + xOffset + (i % t.cols) * (s.x + t.gap);
             const tileZ = zMin + Math.floor(i / t.cols) * (s.z + t.gap);
-            // Fused Q/K/V tensors are sliced below, per third.
-            const split = s.heads && s.heads.axis !== 'tiles' && !s.fusedRoles ? s.heads : null;
-            if (!split) {
-              boxes.push({ cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z });
-              heads.push(s.heads?.axis === 'tiles' ? i : null);
-              continue;
-            }
+            return {
+              box: { cx: minX + s.x / 2, cy: y + h / 2, cz: tileZ + s.z / 2, sx: s.x, sy: h, sz: s.z },
+              head: s.heads?.axis === 'tiles' ? i : null, row: 'written', role: s.role ?? null, expert: s.expert ?? null,
+            };
+          });
+          const split = s.heads;
+          if (split && split.axis !== 'tiles' && !s.fusedRoles) {
             // One band per head, no gaps: the tensor keeps its exact footprint.
-            const bx = split.axis === 'x' ? s.x / split.count : s.x;
-            const bz = split.axis === 'z' ? s.z / split.count : s.z;
-            for (let hd = 0; hd < split.count; hd++) {
-              const ox = split.axis === 'x' ? hd * bx : 0;
-              const oz = split.axis === 'z' ? hd * bz : 0;
-              boxes.push({ cx: minX + ox + bx / 2, cy: y + h / 2, cz: tileZ + oz + bz / 2, sx: bx, sy: h, sz: bz });
-              heads.push(hd);
-            }
+            cells = sliceCells(cells, split.axis, evenly(split.count, (head) => ({ head })));
           }
-          let rows = boxes.map((): RowState => 'written');
           if (s.filledZ !== undefined) {
-            // Cache tensors: split every box along Z into rows written earlier, rows this pass wrote, and rows reserved.
+            // Cache tensors: rows written earlier, rows this pass wrote, and rows reserved.
             const fresh = s.freshZ ?? 0;
-            const cuts: [RowState, number, number][] = (
-              [['written', 0, s.filledZ - fresh], ['fresh', s.filledZ - fresh, s.filledZ], ['reserved', s.filledZ, s.z]] as [RowState, number, number][]
-            ).filter(([, a, b]) => b > a);
-            const split: Box[] = [];
-            const splitHeads: (number | null)[] = [];
-            const splitRows: RowState[] = [];
-            boxes.forEach((b, i) => {
-              const start = b.cz - b.sz / 2;
-              for (const [state, a, end] of cuts) {
-                split.push({ ...b, cz: start + (a + end) / 2, sz: end - a });
-                splitHeads.push(heads[i]);
-                splitRows.push(state);
-              }
-            });
-            boxes.splice(0, boxes.length, ...split);
-            heads.splice(0, heads.length, ...splitHeads);
-            rows = splitRows;
+            const cuts: [RowState, number, number][] = [['written', 0, s.filledZ - fresh], ['fresh', s.filledZ - fresh, s.filledZ], ['reserved', s.filledZ, s.z]];
+            cells = sliceCells(cells, 'z', cuts.filter(([, a, b]) => b > a).map(([row, a, b]) => ({ from: a / s.z, to: b / s.z, patch: { row } })));
           }
-          // Each box's attention role: the projection's own, or for a fused Q/K/V weight or bias, the third it covers.
-          let roles = boxes.map(() => s.role ?? null);
           if (s.fusedRoles) {
-            // Q, K and V thirds along the fused axis, each sliced into its heads (when the spec has them).
-            const perThird = s.heads?.count ?? 1;
-            const slices = 3 * perThird;
-            const parts = boxes.flatMap((b) => Array.from({ length: slices }, (_, k) => (s.fusedRoles === 'z'
-              ? { ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / slices), sz: b.sz / slices }
-              : { ...b, cx: b.cx - b.sx / 2 + (k + 0.5) * (b.sx / slices), sx: b.sx / slices })));
-            const thirdRoles = ['q', 'k', 'v'] as const;
-            roles = parts.map((_, k) => thirdRoles[Math.floor((k % slices) / perThird)]);
-            heads.splice(0, heads.length, ...parts.map((_, k) => (s.heads ? (k % slices) % perThird : null)));
-            rows = parts.map((): RowState => 'written');
-            boxes.splice(0, boxes.length, ...parts);
+            // A fused Q/K/V projection: Q, K and V thirds along the fused axis, each sliced into its heads.
+            const perThird = split?.count ?? 1;
+            cells = sliceCells(cells, s.fusedRoles, evenly(3 * perThird, (k) => ({
+              role: FUSED_ROLES[Math.floor(k / perThird)], head: split ? k % perThird : null,
+            })));
           }
-          // Each box's expert: its tensor's, or for a router tensor, the column it covers (one per expert).
-          let experts = boxes.map(() => s.expert ?? null);
           if (s.expertAxis) {
+            // A router tensor: one column per expert along its expert axis.
             const count = s.expertAxis === 'z' ? s.z : s.x;
-            const parts = boxes.flatMap((b) => Array.from({ length: count }, (_, e) => (s.expertAxis === 'z'
-              ? { ...b, cz: b.cz - b.sz / 2 + (e + 0.5) * (b.sz / count), sz: b.sz / count }
-              : { ...b, cx: b.cx - b.sx / 2 + (e + 0.5) * (b.sx / count), sx: b.sx / count })));
-            experts = parts.map((_, k) => k % count);
-            heads.splice(0, heads.length, ...parts.map(() => null));
-            roles = parts.map(() => null);
-            rows = parts.map((): RowState => 'written');
-            boxes.splice(0, boxes.length, ...parts);
+            cells = sliceCells(cells, s.expertAxis, evenly(count, (expert) => ({ expert, head: null, role: null })));
           }
-          local.push({ spec: s, boxes, heads, rows, roles, experts, busZ: 0 });
+          local.push({
+            spec: s, boxes: cells.map((c) => c.box), heads: cells.map((c) => c.head), rows: cells.map((c) => c.row),
+            roles: cells.map((c) => c.role), experts: cells.map((c) => c.expert), busZ: 0,
+          });
         }
         x0 += width + STATION_GAP;
       }
@@ -230,17 +243,8 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
       placed.push(...local);
     }
   }
-  const extent = new Map<number, { min: number; max: number }>();
-  for (const p of placed) {
-    const e = extent.get(p.spec.floor) ?? { min: Infinity, max: -Infinity };
-    for (const b of p.boxes) {
-      e.min = Math.min(e.min, b.cz - b.sz / 2);
-      e.max = Math.max(e.max, b.cz + b.sz / 2);
-    }
-    extent.set(p.spec.floor, e);
-  }
-  const focused = extent.get(o.focusFloor);
-  const depth = focused ? focused.max - focused.min : 0;
+  const focused = boxBounds(placed.filter((p) => p.spec.floor === o.focusFloor).flatMap((p) => p.boxes));
+  const depth = Number.isFinite(focused.minZ) ? focused.maxZ - focused.minZ : 0;
   const gap = Math.max(MIN_FOCUS_GAP, FOCUS_VIEW_SLOPE * depth);
   for (const p of placed) {
     const dy = Math.sign(p.spec.floor - o.focusFloor) * gap;

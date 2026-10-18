@@ -1,8 +1,8 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
-import { formatBytes, formatCount, formatFlops, formatInt } from './format';
-import { FOCUS_VIEW_SLOPE, STATION_GAP, THICKNESS_PER_BYTE, layoutTensors, type Box, type PlacedTensor } from './layout';
+import { formatBytes, formatCount, formatFlops, formatInt, formatPercent } from './format';
+import { FOCUS_VIEW_SLOPE, STATION_GAP, THICKNESS_PER_BYTE, boxBounds, enclosingBox, layoutTensors, type Box, type PlacedTensor } from './layout';
 import { MODELS, type ModelId } from './model/config';
 import { DTYPES } from './model/dtypes';
 import { summarize, type Stats } from './model/stats';
@@ -152,15 +152,8 @@ function rebuild() {
 
 // Camera framing.
 function boundsOf(items: PlacedTensor[]): THREE.Box3 {
-  const box = new THREE.Box3();
-  const v = new THREE.Vector3();
-  for (const { boxes } of items) {
-    for (const b of boxes) {
-      box.expandByPoint(v.set(b.cx - b.sx / 2, b.cy - b.sy / 2, b.cz - b.sz / 2));
-      box.expandByPoint(v.set(b.cx + b.sx / 2, b.cy + b.sy / 2, b.cz + b.sz / 2));
-    }
-  }
-  return box;
+  const b = boxBounds(items.flatMap((p) => p.boxes));
+  return new THREE.Box3(new THREE.Vector3(b.minX, b.minY, b.minZ), new THREE.Vector3(b.maxX, b.maxY, b.maxZ));
 }
 
 /** Width of the screen covered by the settings panel, kept out of the camera's center. */
@@ -402,7 +395,7 @@ function pickAt(e: MouseEvent) {
 
 function share(s: TensorSpec): string {
   const b = byteCount(s);
-  const pct = (x: number, of: number) => `${((100 * x) / of).toPrecision(3)}%`;
+  const pct = (x: number, of: number) => formatPercent(x / of);
   if (s.kind === 'weight') return `${pct(elementCount(s), stats.params)} of all parameters`;
   if (s.kind === 'kv') return `${pct(b, stats.kvBytes)} of the KV cache`;
   if (s.kind === 'activation' && s.floor >= 1 && s.floor <= cfg.nLayers) return `${pct(b, stats.layerActBytes)} of this layer's transient activations`;
@@ -459,7 +452,7 @@ function showPartTooltip(part: Part, e: PointerEvent) {
   // Shares are of the whole layer: its top-level parts (each expert is also inside "Experts").
   const layer = parts.filter((p) => p.kind !== 'expert');
   const sum = (f: (p: Part) => number) => layer.reduce((a, p) => a + f(p), 0);
-  const pct = (x: number, of: number) => (of > 0 ? `${((100 * x) / of).toPrecision(3)}%` : '–');
+  const pct = (x: number, of: number) => (of > 0 ? formatPercent(x / of) : '–');
   const pass = settings.mode === 'decode' ? 'this decode step' : 'the prompt';
   const routed = part.expert !== undefined ? expertTokens?.[settings.focusFloor - 1]?.[part.expert] : undefined;
   const rows: string[] = [
@@ -492,11 +485,7 @@ function showEdgeTooltip(edge: Edge, e: PointerEvent) {
 /** The whole extent of a tensor: all its tiles and head bands in one box. */
 function extentOf(id: string): Box | null {
   const p = placed.find((q) => q.spec.id === id);
-  if (!p) return null;
-  const box = boundsOf([p]);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  return { cx: center.x, cy: center.y, cz: center.z, sx: size.x, sy: size.y, sz: size.z };
+  return p ? enclosingBox(p.boxes) : null;
 }
 
 function showTooltip(p: Pick, e: PointerEvent) {

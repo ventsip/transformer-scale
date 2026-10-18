@@ -24,3 +24,6 @@ export function formatFlops(n: number): string {
   for (const [scale, unit] of units) if (n >= scale) return `${(n / scale).toPrecision(3)} ${unit}`;
   return String(n);
 }
+
+/** A fraction as a percentage to `digits` significant digits. */
+export const formatPercent = (fraction: number, digits = 3) => `${(100 * fraction).toPrecision(digits)}%`;

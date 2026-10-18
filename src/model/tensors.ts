@@ -1,6 +1,6 @@
 import type { ModelConfig } from './config';
 import { DTYPES, type DType } from './dtypes';
-import { formatCount, formatFlops } from '../format';
+import { formatCount, formatFlops, formatInt } from '../format';
 import { routing } from './routing';
 
 /** Which attention projection a weight (or a part of a fused one) is: queries, keys or values. */
@@ -263,7 +263,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     const ropeNote = `Computed once per forward pass and shared by all ${cfg.nLayers} layers and all heads.`;
     const invFreq = push({
       id: 'rotary_emb.inv_freq', label: 'model.rotary_emb.inv_freq', kind: 'buffer', x: half.size, z: 1, dims: [half], dtype: 'fp32',
-      note: `RoPE frequencies θ_i = ${theta.toLocaleString('en-US')}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
+      note: `RoPE frequencies θ_i = ${formatInt(theta)}^(−2i/${cfg.headDim}): a fixed buffer, not a parameter. ` +
         `Wavelengths 2π/θ_i run from ~6 tokens to ~${formatTokens(2 * Math.PI * theta ** ((cfg.headDim - 2) / cfg.headDim))} tokens.`,
     });
     next();
@@ -276,7 +276,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   }
   push({
     id: 'position_ids', label: 'position_ids', kind: 'activation', x: 1, z: n, dims: [tok], dtype: 'int64',
-    note: decode ? `Position of the new token: ${past.toLocaleString('en-US')}.` : 'Position of each prompt token: 0 … T−1.',
+    note: decode ? `Position of the new token: ${formatInt(past)}.` : 'Position of each prompt token: 0 … T−1.',
   });
   next();
   /** Lookup of `rows` rows of `table`, which reads only those rows. */
@@ -288,8 +288,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   if (gpt2) {
     const positions: Dim = { name: 'positions', size: cfg.maxContext };
     const wpe = weight('wpe.weight', positions, dModel,
-      `Learned position embeddings: one row per position, ${cfg.maxContext.toLocaleString('en-US')} of them, so the context ` +
-      `cannot grow past ${cfg.maxContext.toLocaleString('en-US')} tokens. Parameters, unlike RoPE.`);
+      `Learned position embeddings: one row per position, ${formatInt(cfg.maxContext)} of them, so the context ` +
+      `cannot grow past ${formatInt(cfg.maxContext)} tokens. Parameters, unlike RoPE.`);
     posEmb = act('pos_emb', 'position embeddings', dModel, 'activation', `${TRANSIENT} One row of wpe per position.`);
     lookup('position lookup', [pos, wpe], wpe, posEmb, 'Copies the row of each position from wpe. No arithmetic.');
     next();
@@ -433,7 +433,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const rows: Dim = { name: `tokens routed to expert ${e}`, size: ne };
       const share = idle
         ? `No token picks expert ${e} in this pass, so its weights are not read.`
-        : `Expert ${e} of ${nExperts}: ${ne.toLocaleString('en-US')} of ${n.toLocaleString('en-US')} tokens routed here.`;
+        : `Expert ${e} of ${nExperts}: ${formatInt(ne)} of ${formatInt(n)} tokens routed here.`;
       const expertWeight = (name: string, inDim: Dim, outDim: Dim, what: string, extra: Partial<TensorSpec> = {}) => {
         // The expert index is part of the id: each expert has its own w1, w2 and w3.
         const id = weight(`experts.${e}.${name}`, inDim, outDim, `${what} ${share}`);
@@ -453,7 +453,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       if (!idle) {
         const xe = expertAct('x', 'h_norm rows', dModel, o.actDtype, 'A copy of the h_norm rows of the tokens routed to this expert.');
         op(`gather (E${e})`, [hNorm, selected], xe,
-          `Selects the ${ne.toLocaleString('en-US')} tokens whose top-${topK} includes expert ${e} and copies their rows (hidden_states[top_x]).`);
+          `Selects the ${formatInt(ne)} tokens whose top-${topK} includes expert ${e} and copies their rows (hidden_states[top_x]).`);
         g = expertAct('g', 'g = x · W_gate', ffn, o.actDtype, 'Gate activations.');
         matmul(xe, w1, g, dModel, ffn, ne);
         u = expertAct('u', 'u = x · W_up', ffn, o.actDtype, 'Up activations.');
@@ -524,11 +524,11 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         const buffer = split(push({
           id, label, kind: 'kv', x: kvDim.size, z: cap, filledZ: keys, freshZ: fresh, rowGap: STACK_GAP, dtype: o.kvDtype,
           dims: cacheDims({ name: 'capacity', size: cap }),
-          note: `Static cache: allocated up front for ${cap.toLocaleString('en-US')} tokens, whatever the prompt length. ` +
-            `${keys.toLocaleString('en-US')} slots written so far; each generated token fills one more.`,
+          note: `Static cache: allocated up front for ${formatInt(cap)} tokens, whatever the prompt length. ` +
+            `${formatInt(keys)} slots written so far; each generated token fills one more.`,
         }), kvHeads);
         op('cache write', [src], buffer, decode
-          ? `index_copy_ of the new ${name} row into slot ${past.toLocaleString('en-US')}: only ${n} row is written.`
+          ? `index_copy_ of the new ${name} row into slot ${formatInt(past)}: only ${n} row is written.`
           : `index_copy_ of ${name} into the preallocated buffer, at positions 0 … T−1.`);
         return buffer;
       }
@@ -544,7 +544,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
         note: `${KV} One row longer than before; the newest row is highlighted.`,
       }), kvHeads);
       op('cat', [previous, src], grown,
-        `DynamicCache.update: torch.cat allocates a new ${keys.toLocaleString('en-US')}-row tensor and copies the whole ` +
+        `DynamicCache.update: torch.cat allocates a new ${formatInt(keys)}-row tensor and copies the whole ` +
         `cache plus the new ${name} row into it, every step. A static cache writes just the one row.`);
       return grown;
     };
@@ -606,7 +606,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
     }
     // Attention reads K and V from the cache.
     const staticNote = isStatic
-      ? ` With a static cache HF attends over all ${cap.toLocaleString('en-US')} slots, masking the empty ones; drawn here for the ${keys.toLocaleString('en-US')} filled slots only.`
+      ? ` With a static cache HF attends over all ${formatInt(cap)} slots, masking the empty ones; drawn here for the ${formatInt(keys)} filled slots only.`
       : '';
     // QKᵀ and ·V are 2 FLOPs per multiply-add each. In prefill the causal mask lets fused kernels skip
     // key > query; a decode query attends to every cached key.
@@ -635,7 +635,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const scoreGrid = (id: string, label: string, dtype: DType, note: string, causal: boolean) => split(push({
         id, label, kind: 'scores', x: keys, z: n, tiles: cfg.nHeads, causal: causal && !decode, dtype, rowGap: STACK_GAP,
         dims: [{ name: 'heads', size: cfg.nHeads }, { name: 'query', size: n }, { name: 'key', size: keys }],
-        note: `${note} One ${n.toLocaleString('en-US')} × ${keys.toLocaleString('en-US')} tile per head; keys run along X, queries along Z.`,
+        note: `${note} One ${formatInt(n)} × ${formatInt(keys)} tile per head; keys run along X, queries along Z.`,
       }), qHeads, 'tiles');
       const scores = scoreGrid('scores', 'QKᵀ/√d', o.actDtype,
         decode ? 'One row of scores per head: the new token against every cached key.' : 'Raw scores, computed in full: including the half the mask is about to discard.', false);
@@ -659,7 +659,7 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       op('attention', [q, kCached, vCached], attn,
         'softmax(QKᵀ/√d)·V per head, fused (FlashAttention / SDPA): no repeat_kv copies, no mask tensor, and the scores never reach memory. ' +
         (decode
-          ? `The new token attends to all ${keys.toLocaleString('en-US')} cached keys: ${formatFlops(attnFlops)} FLOPs, reading the whole K and V cache.`
+          ? `The new token attends to all ${formatInt(keys)} cached keys: ${formatFlops(attnFlops)} FLOPs, reading the whole K and V cache.`
           : `Causal: query i only attends to keys 0..i, so ~${formatFlops(usefulFlops)} FLOPs instead of ${formatFlops(attnFlops)}.`) +
         staticNote, usefulFlops);
     }
@@ -770,8 +770,8 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
   const filtered = strip('filtered', 'after top-k / top-p', 'Tokens outside the kept set are −∞.');
   op('top-k / top-p', [scaled], filtered,
     `Keeps the k most likely tokens, then the smallest set whose probability reaches p; the rest become −∞. ` +
-    `Top-p sorts all ${cfg.vocabSize.toLocaleString('en-US')} logits, allocating sorted values and int64 indices as further temporaries.`);
-  const probs = strip('probs', 'probabilities', `softmax over the vocabulary: ${cfg.vocabSize.toLocaleString('en-US')} probabilities summing to 1, mostly exactly 0 after filtering.`);
+    `Top-p sorts all ${formatInt(cfg.vocabSize)} logits, allocating sorted values and int64 indices as further temporaries.`);
+  const probs = strip('probs', 'probabilities', `softmax over the vocabulary: ${formatInt(cfg.vocabSize)} probabilities summing to 1, mostly exactly 0 after filtering.`);
   op('softmax', [filtered], probs, 'Softmax over the vocabulary.');
   const nextToken = push({
     id: 'next_token', label: 'next token id', kind: 'activation', x: 1, z: 1, rowGap: SAMPLING_GAP, centered: true,
