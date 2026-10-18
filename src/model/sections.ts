@@ -11,6 +11,8 @@ export interface Part {
   /** For one expert of a mixture of experts. */
   expert?: number;
   tensorIds: string[];
+  /** Tensors its tray encloses, when more than its own (the router's tray holds the shared experts' too). */
+  extentIds?: string[];
   params: number;
   weightBytes: number;
   /** Transient activations and attention scores. */
@@ -59,7 +61,9 @@ export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[
 
   const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION))];
   if (!cfg.moe || !isMoeLayer(cfg, floorLayer(floor))) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
-  parts.push(part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION && !s.shared)));
+  const router = part('router', 'Router', 'router', onFloor.filter((s) => s.section === MLP_SECTION && !s.shared));
+  router.extentIds = onFloor.filter((s) => s.section === MLP_SECTION).map((s) => s.id);
+  parts.push(router);
   if (cfg.moe.sharedFfn) parts.push(part('shared', 'Shared experts', 'shared', onFloor.filter((s) => s.shared)));
   parts.push(part('experts', 'Experts', 'experts', onFloor.filter((s) => s.section >= FIRST_EXPERT_SECTION)));
   for (let e = 0; e < cfg.moe.nExperts; e++) {

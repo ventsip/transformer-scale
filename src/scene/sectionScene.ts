@@ -47,7 +47,7 @@ export class SectionScene {
     this.clear();
     const byId = new Map(placed.map((p) => [p.spec.id, p]));
     for (const part of parts) {
-      const boxes = part.tensorIds.flatMap((id) => byId.get(id)?.boxes ?? []);
+      const boxes = (part.extentIds ?? part.tensorIds).flatMap((id) => byId.get(id)?.boxes ?? []);
       if (boxes.length === 0) continue;
       const m = MARGIN[part.kind];
       const b = boxBounds(boxes);
