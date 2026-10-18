@@ -41,6 +41,10 @@
   temperature (outlines show the input on the same scale), top-k and top-p (removed tokens as outlines), softmax, and a
   Sample button that marks the drawn token. Defaults follow Llama 3 (T = 0.6, top-p = 0.9) and HF (top-k = 50); all
   numbers are computed over the whole vocabulary.
+- **SwiGLU** (opened from `SiLU ⊙`, or in expanded mode `SiLU` and `⊙`; in Llama and in every Mixtral expert): SiLU(x) =
+  x·σ(x) as a line against a dashed ReLU reference, with a hover crosshair and its minimum (−0.278 at x ≈ −1.28)
+  marked; then illustrative g, u and a = SiLU(g) ⊙ u for 32 features of one token on one shared scale (outlines show
+  each input), with a button to draw another token.
 
 ## Attention heads
 

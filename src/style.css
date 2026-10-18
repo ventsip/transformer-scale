@@ -404,3 +404,49 @@ button.play {
   flex-direction: column;
   gap: 2px;
 }
+
+/* Line charts (SiLU): the function in the activation color, a dashed gray reference, a crosshair on hover. */
+.op-chart .line {
+  fill: none;
+  stroke: #f5a524;
+  stroke-width: 2;
+}
+
+.op-chart .ref {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.op-chart .marker {
+  fill: #f5a524;
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+
+.op-chart .crosshair {
+  stroke: #64748b;
+  stroke-width: 1;
+}
+
+.op-chart .hit-area {
+  fill: transparent;
+}
+
+.op-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.op-legend i {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  border-top: 2px solid #f5a524;
+}
+
+.op-legend i.swatch-ref {
+  border-top: 2px dashed #94a3b8;
+}

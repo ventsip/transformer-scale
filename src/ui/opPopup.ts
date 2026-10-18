@@ -14,7 +14,26 @@ function samplingStage(op: OpSpec): Stage | null {
   return null;
 }
 
-export const hasViz = (op: OpSpec) => samplingStage(op) !== null;
+/** The stages of the SwiGLU panel. */
+type GluStage = 'silu' | 'gate';
+
+/** Which SwiGLU stage an op belongs to: compact `SiLU ⊙`, or expanded `SiLU` and `⊙`. */
+function swigluStage(op: OpSpec): GluStage | null {
+  if (op.label === 'SiLU ⊙' || op.label === 'SiLU') return 'silu';
+  if (op.label === '⊙') return 'gate';
+  return null;
+}
+
+/** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
+function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
+  const sampling = samplingStage(op);
+  if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
+  const glu = swigluStage(op);
+  if (glu) return { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body) => swigluViz(body, glu) };
+  return null;
+}
+
+export const hasViz = (op: OpSpec) => vizFor(op) !== null;
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: object = {}): HTMLElementTagNameMap[K] =>
   Object.assign(document.createElement(tag), props);
@@ -27,14 +46,14 @@ const svg = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string,
 
 /** Opens the popup for `op`; Esc, the close button or a click outside closes it. */
 export function openOpPopup(op: OpSpec): void {
-  const stage = samplingStage(op);
-  if (!stage) return;
+  const viz = vizFor(op);
+  if (!viz) return;
   document.querySelector('.op-popup-backdrop')?.remove();
   const backdrop = el('div', { className: 'op-popup-backdrop' });
   const popup = el('div', { className: 'op-popup' });
   const head = el('div', { className: 'op-popup-head' });
   const close = el('button', { className: 'op-popup-close', textContent: '×', title: 'Close (Esc)' });
-  head.append(el('h2', { textContent: 'Sampling: from logits to the next token' }), close);
+  head.append(el('h2', { textContent: viz.title }), close);
   const body = el('div', { className: 'op-popup-body' });
   popup.append(head, body);
   backdrop.append(popup);
@@ -48,7 +67,15 @@ export function openOpPopup(op: OpSpec): void {
   close.addEventListener('click', dismiss);
   backdrop.addEventListener('pointerdown', (e) => e.target === backdrop && dismiss());
   window.addEventListener('keydown', onKey, true);
-  samplingViz(body, stage);
+  viz.render(body);
+}
+
+/** A titled stage of a popup; the focused one (the clicked op's) is highlighted. */
+function stageSection(body: HTMLElement, focused: boolean, title: string, text: string): HTMLElement {
+  const s = el('section', { className: `op-stage${focused ? ' focus' : ''}` });
+  s.append(el('h3', { textContent: title }), el('p', { className: 'op-popup-note', textContent: text }));
+  body.append(s);
+  return s;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -110,10 +137,8 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   const input = Array.from(logits.subarray(0, SHOWN));
   const sections = new Map<Stage, HTMLElement>();
   const section = (stage: Stage, title: string, text: string) => {
-    const s = el('section', { className: `op-stage${stage === focus ? ' focus' : ''}` });
-    s.append(el('h3', { textContent: title }), el('p', { className: 'op-popup-note', textContent: text }));
+    const s = stageSection(body, stage === focus, title, text);
     sections.set(stage, s);
-    body.append(s);
     return s;
   };
   const slider = (label: string, min: number, max: number, step: number, value: number) => {
@@ -232,8 +257,149 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
   sections.get(focus)?.scrollIntoView({ block: 'center' });
 }
 
+// ---------------------------------------------------------------------------------------------
+// SwiGLU: a = SiLU(g) ⊙ u
+
+const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+const silu = (x: number) => x * sigmoid(x);
+/** SiLU's minimum: x = −1.2785 solves 1 + x(1 − σ(x)) = 0. */
+const SILU_MIN_X = -1.2785;
+/** Features shown for one illustrative token. */
+const FEATURES = 32;
+
+function swigluViz(body: HTMLElement, focus: GluStage): void {
+  const sSilu = stageSection(body, focus === 'silu', 'SiLU(x) = x · σ(x)',
+    'The activation of the gate. Like ReLU for large |x|, but smooth, and slightly negative for negative inputs. ' +
+    'No parameters: elementwise, the same for every feature and token.');
+  sSilu.append(siluChart());
+  const fSilu = el('div', { className: 'op-popup-facts' });
+  fSilu.innerHTML =
+    `Its minimum is <b>${silu(SILU_MIN_X).toFixed(3)}</b> at x = <b>${SILU_MIN_X.toFixed(2)}</b>; below that it rises back toward 0. ` +
+    `σ(x) is the share of x that passes: <b>${(100 * sigmoid(2)).toFixed(0)}%</b> at x = 2, <b>${(100 * sigmoid(-2)).toFixed(0)}%</b> at x = −2.`;
+  sSilu.append(fSilu);
+
+  const sGate = stageSection(body, focus === 'gate', 'a = SiLU(g) ⊙ u',
+    `Two projections of the same input: the gate g = x · W_gate and the up projection u = x · W_up. ` +
+    `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for ${FEATURES} of the d_ffn features of one token, all on one scale.`);
+  const resample = el('button', { textContent: 'Another token' });
+  const row = el('div', { className: 'op-popup-control' });
+  row.append(resample);
+  const cGate = barChart('SiLU(g)', 'outlines: g');
+  const cUp = barChart('u', '');
+  const cOut = barChart('a = SiLU(g) ⊙ u', 'outlines: u');
+  const facts = el('div', { className: 'op-popup-facts' });
+  sGate.append(row, cGate.root, cUp.root, cOut.root, facts);
+
+  let seed = 11;
+  function update() {
+    const rand = rng(seed);
+    const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const g = Array.from({ length: FEATURES }, () => 1.6 * normal());
+    const u = Array.from({ length: FEATURES }, () => normal());
+    const sg = g.map(silu);
+    const a = sg.map((v, i) => v * u[i]);
+    const all = [...g, ...u, ...a];
+    const lo = Math.min(...all);
+    const hi = Math.max(...all);
+    const ticks = [0, 8, 16, 24, FEATURES - 1];
+    const tick = (i: number) => String(i);
+    const f = (v: number) => v.toFixed(2);
+    cGate.draw({ values: sg, ghost: g, lo, hi, tickLabel: tick, ticks, describe: (i) => `feature ${i} · g = ${f(g[i])} → SiLU(g) = ${f(sg[i])}` });
+    cUp.draw({ values: u, lo, hi, tickLabel: tick, ticks, describe: (i) => `feature ${i} · u = ${f(u[i])}` });
+    cOut.draw({
+      values: a, ghost: u, lo, hi, tickLabel: tick, ticks,
+      describe: (i) => `feature ${i} · ${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`,
+    });
+    const closed = g.filter((v) => v < 0).length;
+    facts.innerHTML =
+      `<b>${closed}</b> of ${FEATURES} gates are negative: SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
+      `so those features of u barely pass (and flip sign slightly). Positive gates pass u scaled by about g. ` +
+      'Cheap in FLOPs, but g, u and a are each a full T × d_ffn tensor, several times wider than the residual stream.';
+  }
+  resample.addEventListener('click', () => {
+    seed++;
+    update();
+  });
+  update();
+  (focus === 'gate' ? sGate : sSilu).scrollIntoView({ block: 'center' });
+}
+
+/** SiLU against ReLU over x ∈ [−6, 6], with a hover crosshair and the minimum marked. */
+function siluChart(): HTMLElement {
+  const W = 560;
+  const H = 220;
+  const pad = { l: 40, r: 12, t: 10, b: 22 };
+  const [xLo, xHi, yLo, yHi] = [-6, 6, -1, 6];
+  const px = (x: number) => pad.l + ((x - xLo) / (xHi - xLo)) * (W - pad.l - pad.r);
+  const py = (y: number) => pad.t + ((yHi - y) / (yHi - yLo)) * (H - pad.t - pad.b);
+  const root = el('figure', { className: 'op-chart' });
+  const caption = el('figcaption');
+  caption.innerHTML = '<span class="op-legend"><i class="swatch-line"></i>SiLU(x)</span>' +
+    '<span class="op-legend"><i class="swatch-ref"></i>ReLU(x) = max(0, x), for reference</span>';
+  const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'SiLU and ReLU from x = −6 to 6' });
+  const tip = el('div', { className: 'op-chart-tip' });
+  tip.hidden = true;
+  root.append(caption, plot, tip);
+
+  for (let y = yLo; y <= yHi; y++) {
+    plot.append(svg('line', { x1: pad.l, x2: W - pad.r, y1: py(y), y2: py(y), class: y === 0 ? 'axis' : 'grid' }));
+    const label = svg('text', { x: pad.l - 6, y: py(y) + 3, class: 'tick', 'text-anchor': 'end' });
+    label.textContent = String(y);
+    plot.append(label);
+  }
+  for (let x = xLo; x <= xHi; x += 2) {
+    if (x === 0) plot.append(svg('line', { x1: px(0), x2: px(0), y1: py(yLo), y2: py(yHi), class: 'axis' }));
+    const label = svg('text', { x: px(x), y: H - 6, class: 'tick', 'text-anchor': 'middle' });
+    label.textContent = String(x);
+    plot.append(label);
+  }
+  const path = (f: (x: number) => number) => {
+    let d = '';
+    for (let i = 0; i <= 240; i++) {
+      const x = xLo + ((xHi - xLo) * i) / 240;
+      d += `${i ? 'L' : 'M'}${px(x).toFixed(1)},${py(f(x)).toFixed(1)}`;
+    }
+    return d;
+  };
+  plot.append(svg('path', { d: path((x) => Math.max(0, x)), class: 'ref' }));
+  plot.append(svg('path', { d: path(silu), class: 'line' }));
+  const minY = silu(SILU_MIN_X);
+  plot.append(svg('circle', { cx: px(SILU_MIN_X), cy: py(minY), r: 4, class: 'marker' }));
+  const minLabel = svg('text', { x: px(SILU_MIN_X), y: py(minY) + 16, class: 'tick', 'text-anchor': 'middle' });
+  minLabel.textContent = `min ${minY.toFixed(3)}`;
+  plot.append(minLabel);
+
+  // Crosshair: follows the pointer along x.
+  const cross = svg('line', { y1: py(yHi), y2: py(yLo), class: 'crosshair', visibility: 'hidden' });
+  const dot = svg('circle', { r: 4, class: 'marker', visibility: 'hidden' });
+  const hit = svg('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r, height: H - pad.t - pad.b, class: 'hit-area' });
+  plot.append(cross, dot, hit);
+  hit.addEventListener('pointermove', (e) => {
+    const box = plot.getBoundingClientRect();
+    const sx = ((e.clientX - box.left) / box.width) * W;
+    const x = Math.max(xLo, Math.min(xHi, xLo + ((sx - pad.l) / (W - pad.l - pad.r)) * (xHi - xLo)));
+    for (const node of [cross, dot]) node.setAttribute('visibility', 'visible');
+    cross.setAttribute('x1', String(px(x)));
+    cross.setAttribute('x2', String(px(x)));
+    dot.setAttribute('cx', String(px(x)));
+    dot.setAttribute('cy', String(py(silu(x))));
+    tip.textContent = `x = ${x.toFixed(2)} · σ(x) = ${sigmoid(x).toFixed(3)} · SiLU = ${silu(x).toFixed(3)} · ReLU = ${Math.max(0, x).toFixed(2)}`;
+    tip.hidden = false;
+    tip.style.left = `${(px(x) / W) * 100}%`;
+  });
+  hit.addEventListener('pointerleave', () => {
+    for (const node of [cross, dot]) node.setAttribute('visibility', 'hidden');
+    tip.hidden = true;
+  });
+  return root;
+}
+
 interface Draw {
   values: number[];
+  /** Label of the column ticks (default: rank, #1). */
+  tickLabel?: (i: number) => string;
+  /** Columns that get a tick label (default: ranks 1, 10, 20, …). */
+  ticks?: number[];
   lo: number;
   hi: number;
   describe: (i: number) => string;
@@ -248,7 +414,7 @@ interface Draw {
 }
 
 /** A single-series column chart in SVG, with optional outlines, removed columns, a marked column and hover tooltips. */
-function barChart() {
+function barChart(title?: string, subtitle = '') {
   const W = 560;
   const H = 150;
   const pad = { l: 40, r: 8, t: 10, b: 18 };
@@ -256,9 +422,14 @@ function barChart() {
   const plot = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
   const tip = el('div', { className: 'op-chart-tip' });
   tip.hidden = true;
+  if (title) {
+    const caption = el('figcaption', { textContent: title });
+    if (subtitle) caption.append(el('span', { textContent: subtitle }));
+    root.append(caption);
+  }
   root.append(plot, tip);
 
-  function draw({ values, lo, hi, describe, ghost, removed, picked, percent }: Draw) {
+  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
     const x0 = pad.l;
     const band = (W - pad.l - pad.r) / values.length;
@@ -297,9 +468,9 @@ function barChart() {
       plot.append(hit);
     });
 
-    for (const i of [0, 9, 19, 29, 39].filter((i) => i < values.length)) {
+    for (const i of ticks.filter((i) => i < values.length)) {
       const label = svg('text', { x: x0 + band * (i + 0.5), y: H - 4, class: 'tick', 'text-anchor': 'middle' });
-      label.textContent = `#${i + 1}`;
+      label.textContent = tickLabel(i);
       plot.append(label);
     }
   }
