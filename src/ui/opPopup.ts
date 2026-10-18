@@ -1173,7 +1173,7 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
  * negative index counting from the end (so both stay in view when a chart shows only the ends of the vector). Their
  * size is fixed, so the ordinary features stay readable next to them at any d_model.
  */
-const OUTLIERS: [number, number][] = [[11, 14], [-24, -9]];
+const OUTLIERS: [number, number][] = [[11, 5], [-24, -4]];
 const outlierIndex = (i: number, length: number) => (i < 0 ? length + i : i);
 /** Features of a full-length token shown as bars: the first NORM_HEAD and the last NORM_TAIL. */
 const NORM_HEAD = 32;
