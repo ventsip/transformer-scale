@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { PlacedTensor } from '../layout';
-import { byteCount, onPath, type HeadSelection, type OpSpec } from '../model/tensors';
+import { byteCount, onPath, type HeadSelection, type OpSpec, type Role } from '../model/tensors';
 import { KIND_COLORS } from './tensorScene';
 import { hasViz, openOpPopup } from '../ui/opPopup';
 
@@ -39,9 +39,11 @@ const MAX_SEGMENTS = 1024;
 const UNITS_PER_SEGMENT = 1000;
 
 /** Bounds of a tensor's boxes; with a head selected, of only the bands on its path (when it has any). */
-function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
+function bounds(p: PlacedTensor, sel: HeadSelection | null = null, role?: Role) {
   const split = p.spec.heads;
-  const boxes = sel && split ? p.boxes.filter((_, i) => onPath(split, p.heads[i]!, sel)) : p.boxes;
+  const onHead = sel && split ? p.boxes.filter((_, i) => onPath(split, p.heads[i]!, sel)) : p.boxes;
+  // Only the part of a fused Q/K/V tensor an op reads.
+  const boxes = role ? onHead.filter((b) => p.roles[p.boxes.indexOf(b)] === role) : onHead;
   const b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity, base: Infinity, top: -Infinity };
   for (const box of boxes.length ? boxes : p.boxes) {
     b.minX = Math.min(b.minX, box.cx - box.sx / 2);
@@ -55,8 +57,8 @@ function bounds(p: PlacedTensor, sel: HeadSelection | null = null) {
 }
 
 /** Where edges attach to a tensor: the center of its top (or bottom) face, all tiles together. */
-function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'bottom' = 'top'): THREE.Vector3 {
-  const b = bounds(p, sel);
+function anchor(p: PlacedTensor, sel: HeadSelection | null, face: 'top' | 'bottom' = 'top', role?: Role): THREE.Vector3 {
+  const b = bounds(p, sel, role);
   return new THREE.Vector3((b.minX + b.maxX) / 2, face === 'top' ? b.top : b.base, (b.minZ + b.maxZ) / 2);
 }
 
@@ -261,9 +263,9 @@ export class FlowScene {
         const ends = { tensors: [p!.spec.id], label: div, text: `${p!.spec.label} → ${text}` };
         // Inputs of an op that sits under a higher floor rise into it; inputs from a lower floor (RoPE tables, the
         // causal mask) climb in front of the floor and come in from the front; the rest arc within the floor.
-        if (crossFloor) riser(anchor(p!, sel), pos, color, bytes, ends);
-        else if (p!.spec.floor < op.floor) climb(anchor(p!, sel), pos, color, bytes, ends, side(p!));
-        else arc(anchor(p!, sel), pos, color, bytes, ends);
+        if (crossFloor) riser(anchor(p!, sel, 'top', op.inputRoles?.[p!.spec.id]), pos, color, bytes, ends);
+        else if (p!.spec.floor < op.floor) climb(anchor(p!, sel, 'top', op.inputRoles?.[p!.spec.id]), pos, color, bytes, ends, side(p!));
+        else arc(anchor(p!, sel, 'top', op.inputRoles?.[p!.spec.id]), pos, color, bytes, ends);
       }
       const outColor = carriesStream ? RESIDUAL_COLOR : KIND_COLORS[out.spec.kind].edge;
       // The op sits right above its output (or right below it, across floors): a straight line into it.

@@ -186,10 +186,12 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
             heads.splice(0, heads.length, ...splitHeads);
             rows = splitRows;
           }
-          // Each box's attention role: the projection's own, or for a fused Q/K/V weight, the third along Z it covers.
+          // Each box's attention role: the projection's own, or for a fused Q/K/V weight or bias, the third it covers.
           let roles = boxes.map(() => s.role ?? null);
           if (s.fusedRoles) {
-            const thirds = boxes.flatMap((b) => [0, 1, 2].map((k) => ({ ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / 3), sz: b.sz / 3 })));
+            const thirds = boxes.flatMap((b) => [0, 1, 2].map((k) => (s.fusedRoles === 'z'
+              ? { ...b, cz: b.cz - b.sz / 2 + (k + 0.5) * (b.sz / 3), sz: b.sz / 3 }
+              : { ...b, cx: b.cx - b.sx / 2 + (k + 0.5) * (b.sx / 3), sx: b.sx / 3 })));
             roles = boxes.flatMap(() => ['q', 'k', 'v'] as const);
             heads.splice(0, heads.length, ...thirds.map(() => null));
             rows = thirds.map((): RowState => 'written');

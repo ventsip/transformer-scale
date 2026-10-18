@@ -56,8 +56,9 @@ export interface TensorSpec {
   residual?: boolean;
   /** Attention role of a projection weight: W_q, W_k or W_v. */
   role?: Role;
-  /** A fused Q/K/V projection weight (GPT-2's c_attn): its output dim, along Z, holds Q, K and V in equal thirds. */
-  fusedRoles?: boolean;
+  /** A fused Q/K/V projection weight or bias (GPT-2's c_attn): the axis of its output dim, which holds Q, K and V in
+   * equal thirds (Z for the weight, X for the bias). */
+  fusedRoles?: 'x' | 'z';
   /** Mixture of experts: the expert this tensor belongs to. */
   expert?: number;
   /** Weights of an expert no token is routed to in this pass: never read, drawn dimmed. */
@@ -110,6 +111,8 @@ export interface OpSpec {
   note: string;
   /** Bytes actually read from an input, when that is less than the whole tensor (by input id). */
   inputBytes?: Record<string, number>;
+  /** The part of a fused Q/K/V input an op reads (by input id): its pipe attaches there. */
+  inputRoles?: Record<string, Role>;
   /** Floating-point operations, for the ops that do meaningful arithmetic (matmuls, attention). */
   flops?: number;
 }
@@ -549,14 +552,17 @@ export function buildModel(cfg: ModelConfig, o: BuildOptions): Model {
       const qkvDim: Dim = { name: '3 · d_model (Q, K, V)', size: 3 * cfg.dModel };
       const wqkv = weight('attn.c_attn.weight', dModel, qkvDim,
         `Q, K and V projections fused into one matrix (Conv1D: input dim first): output columns 0–${cfg.dModel - 1} are W_q, then W_k, then W_v. ${gqaNote}`);
-      tensors[tensors.length - 1].fusedRoles = true;
+      tensors[tensors.length - 1].fusedRoles = 'z';
       const bqkv = vector('attn.c_attn.bias', qkvDim);
-      const third = (out: string, dim: Dim, what: string) => {
+      tensors[tensors.length - 1].fusedRoles = 'x';
+      const third = (out: string, dim: Dim, what: 'Q' | 'K' | 'V') => {
+        const role = what === 'Q' ? 'q' : what === 'K' ? 'k' : 'v';
         matmul(xNorm, wqkv, out, dModel, dim, n, bqkv);
         const last = ops[ops.length - 1];
         last.note = `${what}: one third of c_attn, the fused projection. ${last.note} In HF one matmul yields Q, K and V ` +
           `together, as views of one [${n} × ${3 * cfg.dModel}] tensor.`;
         last.inputBytes = { [wqkv]: cfg.dModel * dim.size * DTYPES[o.weightDtype].bytes, [bqkv]: dim.size * DTYPES[o.weightDtype].bytes };
+        last.inputRoles = { [wqkv]: role, [bqkv]: role };
       };
       q = split(act('q', 'Q = x_norm · W_attn[Q] + b', qDim), qHeads);
       third(q, qDim, 'Q');
