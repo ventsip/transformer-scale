@@ -34,6 +34,33 @@ export interface ModelConfig {
    * layers (DeepSeek-V2's modeling code).
    */
   ropePerLayer?: boolean;
+  /** Local attention: most layers see only the last `size` tokens; every `every`-th layer is global (Gemma 3). */
+  slidingWindow?: SlidingWindowConfig;
+  /** RMSNorm on each head's Q and K before RoPE (q_norm, k_norm). */
+  qkNorm?: boolean;
+  /**
+   * Gemma's RMSNorm: the weight is stored as an offset from 1, so the scale is (1 + weight), applied in fp32 before
+   * the cast back.
+   */
+  normOffset?: boolean;
+  /** Norms after attention and after the MLP too, before each residual add (Gemma's four norms per layer). */
+  postNorms?: boolean;
+  /** The token embedding is multiplied by √d_model (Gemma's embed_scale). */
+  embedScale?: boolean;
+  /** The LM head is the token embedding (tie_word_embeddings); GPT-2 always ties them. */
+  tiedEmbedding?: boolean;
+  /** The gated MLP's activation: SiLU (SwiGLU, the default) or GELU, tanh approximation (GeGLU). */
+  mlpAct?: 'silu' | 'gelu_tanh';
+}
+
+/** Sliding-window attention, interleaved with global layers (layer_types). */
+export interface SlidingWindowConfig {
+  /** Keys a query sees, itself included. */
+  size: number;
+  /** Layers l with (l + 1) % every === 0 attend globally. */
+  every: number;
+  /** RoPE base of the sliding layers (rope_local_base_freq); global layers keep ropeTheta. */
+  ropeTheta: number;
 }
 
 /** Each token runs through `topK` of `nExperts` experts (and, if any, the shared experts). */
@@ -86,6 +113,10 @@ export const ropeDim = (cfg: ModelConfig) => cfg.mla?.qkRopeDim ?? cfg.headDim;
 export const vHeadDim = (cfg: ModelConfig) => cfg.mla?.vDim ?? cfg.headDim;
 /** Whether decoder layer `layer` routes through experts (or keeps a dense MLP). */
 export const isMoeLayer = (cfg: ModelConfig, layer: number) => !!cfg.moe && layer >= cfg.moe.denseLayers;
+/** Whether decoder layer `layer` attends within a sliding window (or to every key). */
+export const isSlidingLayer = (cfg: ModelConfig, layer: number) => !!cfg.slidingWindow && (layer + 1) % cfg.slidingWindow.every !== 0;
+/** Keys a query of decoder layer `layer` may see: its window, or all of them. */
+export const layerWindow = (cfg: ModelConfig, layer: number) => (isSlidingLayer(cfg, layer) ? cfg.slidingWindow!.size : Infinity);
 
 // https://huggingface.co/meta-llama/Meta-Llama-3-8B/blob/main/config.json
 export const LLAMA_3_8B: ModelConfig = {
@@ -170,6 +201,32 @@ export const DEEPSEEK_V2_LITE: ModelConfig = {
   yarn: { factor: 40, originalContext: 4096, betaFast: 32, betaSlow: 1, mscale: 0.707, mscaleAllDim: 0.707 },
 };
 
+// https://huggingface.co/google/gemma-3-1b-pt/blob/main/config.json (gated; checked against the public mirror
+// unsloth/gemma-3-1b-pt): text only, multi-query attention (4 query heads, 1 KV head), five sliding-window layers to
+// each global one, QK-norm, four norms per layer, GeGLU, and a 262K vocabulary tied to the LM head.
+export const GEMMA_3_1B: ModelConfig = {
+  name: 'Gemma-3-1B',
+  arch: 'llama',
+  vocabSize: 262144,
+  dModel: 1152,
+  nLayers: 26,
+  nHeads: 4,
+  nKvHeads: 1,
+  headDim: 256,
+  dFfn: 6912,
+  maxContext: 32768,
+  ropeTheta: 1e6,
+  normEps: 1e-6,
+  bos: { text: '<bos>', id: 2 },
+  slidingWindow: { size: 512, every: 6, ropeTheta: 10000 },
+  qkNorm: true,
+  normOffset: true,
+  postNorms: true,
+  embedScale: true,
+  tiedEmbedding: true,
+  mlpAct: 'gelu_tanh',
+};
+
 // https://huggingface.co/openai-community/gpt2/blob/main/config.json: multi-head attention (as many KV heads as query
 // heads), d_ffn = 4 · d_model (n_inner unset).
 export const GPT2: ModelConfig = {
@@ -198,7 +255,7 @@ export const GPT2_XL: ModelConfig = {
   dFfn: 6400,
 };
 
-export type ModelId = 'gpt2' | 'gpt2-xl' | 'llama-3-8b' | 'llama-3-70b' | 'mixtral-8x7b' | 'deepseek-v2-lite';
+export type ModelId = 'gpt2' | 'gpt2-xl' | 'llama-3-8b' | 'llama-3-70b' | 'mixtral-8x7b' | 'deepseek-v2-lite' | 'gemma-3-1b';
 
 export const MODELS: Record<ModelId, ModelConfig> = {
   'gpt2': GPT2,
@@ -207,4 +264,5 @@ export const MODELS: Record<ModelId, ModelConfig> = {
   'llama-3-70b': LLAMA_3_70B,
   'mixtral-8x7b': MIXTRAL_8X7B,
   'deepseek-v2-lite': DEEPSEEK_V2_LITE,
+  'gemma-3-1b': GEMMA_3_1B,
 };

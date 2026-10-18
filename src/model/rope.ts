@@ -4,11 +4,10 @@ import { ropeDim, type ModelConfig } from './config';
  * RoPE's frequencies θ_i, one per pair of rotated dims: ropeTheta^(−2i/d). With YaRN (DeepSeek-V2's
  * yarn_find_correction_range and linear_ramp_mask), pairs that turn fewer than `betaSlow` times over the original
  * context are slowed by the factor, pairs turning more than `betaFast` times are kept, and the ones between blend
- * linearly.
+ * linearly. `base`: another RoPE base than the model's (Gemma's sliding layers).
  */
-export function ropeFrequencies(cfg: ModelConfig): number[] {
+export function ropeFrequencies(cfg: ModelConfig, base = cfg.ropeTheta!): number[] {
   const d = ropeDim(cfg);
-  const base = cfg.ropeTheta!;
   const plain = Array.from({ length: d / 2 }, (_, i) => base ** (-(2 * i) / d));
   const y = cfg.yarn;
   if (!y) return plain;

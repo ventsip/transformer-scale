@@ -1,4 +1,4 @@
-import { isMoeLayer, type ModelConfig } from './config';
+import { isMoeLayer, isSlidingLayer, type ModelConfig } from './config';
 import { ATTENTION_SECTION, FIRST_EXPERT_SECTION, MLP_SECTION, byteCount, elementCount, floorLayer, isLayerFloor, isTransient, type Model, type TensorSpec } from './tensors';
 
 export type PartKind = 'attention' | 'mlp' | 'router' | 'shared' | 'experts' | 'expert';
@@ -61,7 +61,18 @@ export function floorParts(cfg: ModelConfig, model: Model, floor: number): Part[
     };
   };
 
-  const parts = [part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION))];
+  const attention = part('attention', 'Attention', 'attention', onFloor.filter((s) => s.section === ATTENTION_SECTION));
+  const sw = cfg.slidingWindow;
+  if (sw) {
+    // Gemma 3: five sliding-window layers to each global one.
+    const sliding = isSlidingLayer(cfg, floorLayer(floor));
+    attention.name = sliding ? 'Sliding-window attention' : 'Global attention';
+    attention.note = sliding
+      ? `Local: each query sees only the last ${sw.size} keys, itself included, so this layer's KV cache stops growing at ${sw.size} tokens. ` +
+        `RoPE base ${sw.ropeTheta.toLocaleString('en-US')}.`
+      : `Global: every key, as in Llama. One layer in ${sw.every}; the others attend within ${sw.size}-token windows. RoPE base ${cfg.ropeTheta!.toLocaleString('en-US')}.`;
+  }
+  const parts = [attention];
   if (!cfg.moe) return [...parts, part('mlp', 'MLP', 'mlp', onFloor.filter((s) => s.section === MLP_SECTION))];
   if (!isMoeLayer(cfg, floorLayer(floor))) {
     // A mixture-of-experts model whose first layers keep a dense MLP.

@@ -3,7 +3,7 @@ import type { ModelConfig } from './model/config';
 import { DTYPES } from './model/dtypes';
 import type { Part } from './model/sections';
 import type { Stats } from './model/stats';
-import { byteCount, elementCount, floorLayer, floorName, isLayerFloor, kvGroup, type Mode, type TensorSpec } from './model/tensors';
+import { byteCount, elementCount, floorLayer, floorName, isLayerFloor, keptEntries, kvGroup, type Mode, type TensorSpec } from './model/tensors';
 import { cssColor } from './palette';
 import type { Edge } from './scene/flowScene';
 import { KIND_COLORS, type Pick } from './scene/tensorScene';
@@ -104,8 +104,14 @@ export class Tooltips {
     return '';
   }
 
-  private maskLine({ part }: Pick): string {
+  private maskLine({ part, item }: Pick): string {
     const { T } = this.context();
+    const window = item.spec.window;
+    if (window !== undefined && window < T && part !== 'box') {
+      const kept = keptEntries(T, window);
+      if (part === 'kept') return `<div class="tt-head">Kept by the sliding-window mask (the last ${formatInt(window)} keys up to the query): <b>${formatCount(kept)}</b> entries per T×T tile</div>`;
+      if (part === 'outside') return `<div class="tt-head">Outside the window (${formatInt(window)} or more keys back): <b>${formatCount((T * (T + 1)) / 2 - kept)}</b> entries per T×T tile: −∞ before softmax, 0 after</div>`;
+    }
     if (part === 'kept') return `<div class="tt-head">Kept by the causal mask (key ≤ query): <b>${formatCount((T * (T + 1)) / 2)}</b> entries per T×T tile</div>`;
     if (part === 'masked') return `<div class="tt-head">Causally masked (key > query): <b>${formatCount((T * (T - 1)) / 2)}</b> entries per T×T tile: −∞ before softmax, 0 after</div>`;
     return '';

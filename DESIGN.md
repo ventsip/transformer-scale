@@ -67,7 +67,8 @@
 - **SwiGLU** (opened from `SiLU ⊙`, or in expanded mode `SiLU` and `⊙`; in Llama and in every Mixtral expert): SiLU(x) =
   x·σ(x) as a line against a dashed ReLU reference, with a hover crosshair and its minimum (−0.278 at x ≈ −1.28)
   marked; then illustrative g, u and a = SiLU(g) ⊙ u for one token, both ends of its d_ffn features, on one shared scale (outlines show
-  each input), with a button to draw another token.
+  each input), with a button to draw another token. Gemma's GeGLU opens the same panel with GELU (tanh form) in place
+  of SiLU, against a dashed SiLU reference.
 - **RMSNorm** (opened from `RMSNorm`, or any step of the expanded chain; identified by output id, since labels like
   `× weight` repeat elsewhere): one illustrative token of the full d_model, drawn by both ends, with two outlier
   features (fixed in size, so ordinary features stay readable) and a scale slider; x² with
@@ -89,14 +90,18 @@
 - **KV cache** (opened from the cache ops: `cat` of a dynamic cache in decode, `cache write` of a static one; every
   model): what each token adds per layer (from `cacheParts`, shared with the builder), with the real totals; the
   dynamic cache's torch.cat copying the whole cache every step, as a line against the cache length with this pass
-  marked, and the total for 1,000 more tokens; the static cache's written and reserved slots.
+  marked, and the total for 1,000 more tokens; the static cache's written and reserved slots. With sliding-window
+  layers (Gemma), a bar per layer of the tokens it caches at this length, and every total counts those layers at
+  most their window.
 - **RoPE** (opened from `cos(pos·θ)` / `sin(pos·θ)` on the embedding floor, or `RoPE` in any layer; computed from the
   model's RoPE base, head_dim and context): the wavelength of each of the 64 pairs on a log axis against the context
   length; dials for 8 pairs rotating with a position slider; and the score of identical q and k against their distance
-  m − n (log axis), which shows that RoPE makes scores depend on distance only, decaying with ripples.
+  m − n (log axis), which shows that RoPE makes scores depend on distance only, decaying with ripples. A sliding-window
+  layer's ops (Gemma) carry its own base and window, which replace the model's base and context in the charts.
 - **Attention** (opened from fused `attention`, or any eager step: repeat_kv, the causal mask, QKᵀ/√d, + mask, softmax,
   its cast, · V): one illustrative head over 12 tokens, with patterns real heads show (a sink on the first token, the
-  previous token, "it" → "cat"). Scores as a diverging heatmap with a causal-mask toggle (masked cells hatched), softmax
+  previous token, "it" → "cat"). Scores as a diverging heatmap with a causal-mask toggle (masked cells hatched; for
+  models with sliding-window layers, a second toggle for a toy 4-key window, on when opened from such a layer), softmax
   probabilities as a sequential heatmap, and the selected query's weights over the keys (click a row). A note gives the
   real cost of the current pass: the T × T grids eager attention allocates, which fused kernels never write, or in decode
   the single row against the whole cache.
@@ -224,6 +229,29 @@
   renormalization come from the config, so Mixtral and DeepSeek share one builder.
 - Parameters 15.7B; active per token 2.66B (DeepSeek quotes 2.4B, leaving out the embedding).
 
+## Gemma-3-1B: local and global layers
+
+- **Sliding-window attention.** Five layers in six (all but 5, 11, 17, 23) see only the last 512 keys, the query
+  included; their trays read "Sliding-window attention", the others "Global attention". Each type has its own RoPE
+  tables on the embedding floor: base 10,000 for the sliding layers, 1,000,000 for the global ones (`ropeTables`).
+- **Banded mask.** In eager prefill past 512 tokens, a sliding layer's score tiles keep only a band along the
+  diagonal; the corner below it is masked too (`TensorSpec.window`, drawn as a parallelogram and a triangle). The
+  embedding floor builds a second mask for those layers. Fused attention counts only the band's FLOPs (FlashAttention's
+  window_size).
+- **Caches that stop growing** (HF `DynamicSlidingWindowLayer` and `StaticSlidingWindowLayer`): in decode a sliding
+  layer's dynamic cache holds at most 511 rows, plus the new one torch.cat adds; in prefill it keeps a view of K's last
+  511 rows, which holds on to all of K until the first decode step, so it is drawn whole. The static cache allocates
+  only the window; once full, each step rolls it left by one. A prompt longer than the window leaves its last 512 rows
+  in the buffer, and attention reads K itself. At 32K tokens the cache is about a sixth (17%) of what 26 global layers would hold.
+- **Multi-query attention:** 4 query heads share 1 KV head. **QK-norm:** an RMSNorm on each head's q and k before
+  RoPE (one 256-wide weight shared by the heads). **Four norms per layer:** Gemma's `post_attention_layernorm`
+  normalizes the attention output before the residual add (where Llama's is the norm before the MLP), then
+  `pre_feedforward_layernorm` and `post_feedforward_layernorm` surround the MLP. Gemma's RMSNorm stores its weight as
+  an offset from 1 and applies (1 + weight) in fp32, before the cast back (`normOffset`).
+- **Embedding:** the lookup is multiplied by √1152 (`embed_scale`, a buffer; 34 in bf16), and the 262K × 1152 table
+  (302M of the 1.0B parameters) doubles as the LM head (tied). **GeGLU:** the gated MLP with GELU (tanh form) in place
+  of SiLU, one kernel.
+
 ## Honesty
 
 - **Lifetime matters.** In inference, transient activations exist for one layer at a time, so by default they are
@@ -242,7 +270,7 @@
 
 ## Scope
 
-- Models: GPT-2, GPT-2 XL, Llama-3-8B, Llama-3-70B, Mixtral-8x7B and DeepSeek-V2-Lite (`src/model/config.ts`); everything is derived from the config.
+- Models: GPT-2, GPT-2 XL, Llama-3-8B, Llama-3-70B, Mixtral-8x7B, DeepSeek-V2-Lite and Gemma-3-1B (`src/model/config.ts`); everything is derived from the config.
   Llama-3-70B is 8B scaled up (twice the width, 80 layers) with the same 8 KV heads: weights grow 8.8×, the KV cache
   per token 2.5× (128 → 320 KiB).
 - Mode: static prefill snapshot for a prompt of T tokens. Logits are computed for the last position only, then

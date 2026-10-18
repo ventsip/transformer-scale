@@ -2,7 +2,7 @@
 
 An interactive 3D visualization of a decoder-only transformer, drawn **to scale**, to build intuition for the relative sizes of parameters, activations and the KV cache.
 
-**Live:** https://ventsip.github.io/transformer-scale/ (WebGPU in recent Chrome or Edge; other browsers fall back to WebGL2. Add `?webgl` to the URL to force WebGL2, `?model=gpt2`, `gpt2-xl`, `llama-3-70b`, `mixtral-8x7b` or `deepseek-v2-lite` to open another model.)
+**Live:** https://ventsip.github.io/transformer-scale/ (WebGPU in recent Chrome or Edge; other browsers fall back to WebGL2. Add `?webgl` to the URL to force WebGL2, `?model=gpt2`, `gpt2-xl`, `llama-3-70b`, `mixtral-8x7b`, `deepseek-v2-lite` or `gemma-3-1b` to open another model.)
 
 ## Stack
 

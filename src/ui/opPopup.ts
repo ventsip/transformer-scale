@@ -1,12 +1,12 @@
 import { formatBytes, formatCount, formatFlops, formatInt, formatPercent } from '../format';
-import { LLAMA_3_8B, ropeDim, type ModelConfig } from '../model/config';
+import { LLAMA_3_8B, isSlidingLayer, ropeDim, type ModelConfig } from '../model/config';
 import { ropeFrequencies } from '../model/rope';
 import { DTYPES, type DType } from '../model/dtypes';
 import { routing } from '../model/routing';
 import { PALETTE, cssColor } from '../palette';
 import { gaussian, rng } from '../random';
 import {
-  cacheParts, floorLayer, type AttentionImpl, type KvCacheImpl, type MlaCache, type Mode, type OpSpec, type OpViz, type VizStage,
+  cacheParts, floorLayer, keptEntries, type AttentionImpl, type KvCacheImpl, type MlaCache, type Mode, type OpSpec, type OpViz, type VizStage,
 } from '../model/tensors';
 
 /** The current model: popups take its vocabulary, RoPE base, head and context sizes. */
@@ -44,15 +44,33 @@ type AttnStage = VizStage<'attention'>;
 type RopeStage = VizStage<'rope'>;
 type NormStage = VizStage<'rmsnorm'>;
 
-/** Each popup panel: its title, and how to fill the popup body for an op tagged with it (see OpSpec.viz). */
-const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLElement, viz: Extract<OpViz, { panel: P }>, op: OpSpec) => void } } = {
+/**
+ * Each popup panel: its title (fixed, or from the op's tag and the model), and how to fill the popup body for an op
+ * tagged with it (see OpSpec.viz).
+ */
+const PANELS: { [P in OpViz['panel']]: {
+  title: string | ((viz: Extract<OpViz, { panel: P }>) => string);
+  render: (body: HTMLElement, viz: Extract<OpViz, { panel: P }>, op: OpSpec) => void;
+} } = {
   lookup: { title: 'Embedding lookup: token ids select rows', render: (body) => lookupViz(body) },
   sampling: { title: 'Sampling: from logits to the next token', render: (body, viz) => samplingViz(body, viz.stage) },
   moe: { title: 'Mixture of experts: route, dispatch, combine', render: (body, viz, op) => moeViz(body, viz.stage, floorLayer(op.floor)) },
-  attention: { title: 'Attention: softmax(QKᵀ/√d) · V, one head', render: (body, viz) => attentionViz(body, viz.stage) },
-  rope: { title: 'RoPE: rotary position embedding', render: (body, viz) => ropeViz(body, viz.stage) },
-  rmsnorm: { title: 'RMSNorm: x / RMS(x) · weight', render: (body, viz) => rmsNormViz(body, viz.stage) },
-  swiglu: { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body, viz) => swigluViz(body, viz.stage, viz.width) },
+  attention: {
+    title: (viz) => `Attention: softmax(QKᵀ/√d) · V, one head${viz.window ? ', sliding window' : ''}`,
+    render: (body, viz) => attentionViz(body, viz.stage, viz.window),
+  },
+  rope: {
+    title: (viz) => (viz.window ? 'RoPE: rotary position embedding, sliding-window layers' : 'RoPE: rotary position embedding'),
+    render: (body, viz) => ropeViz(body, viz.stage, viz.theta, viz.window),
+  },
+  rmsnorm: {
+    title: (viz) => `RMSNorm${viz.width ? ' per head' : ''}: x / RMS(x) · ${model.normOffset ? '(1 + weight)' : 'weight'}`,
+    render: (body, viz) => rmsNormViz(body, viz.stage, viz.width),
+  },
+  swiglu: {
+    title: (viz) => (viz.gelu ? 'GeGLU: a = GELU(g) ⊙ u' : 'SwiGLU: a = SiLU(g) ⊙ u'),
+    render: (body, viz) => swigluViz(body, viz.stage, viz.width, viz.gelu),
+  },
   gelu: { title: 'GELU: a = h · Φ(h), tanh approximation', render: (body) => geluViz(body) },
   layernorm: { title: 'LayerNorm: (x − mean) / std · weight + bias', render: (body) => layerNormViz(body) },
   mla: { title: 'Multi-head latent attention: K and V from a latent', render: (body, viz) => mlaViz(body, viz.stage) },
@@ -63,8 +81,8 @@ const PANELS: { [P in OpViz['panel']]: { title: string; render: (body: HTMLEleme
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
   const viz = op.viz;
   if (!viz) return null;
-  const panel = PANELS[viz.panel] as { title: string; render: (body: HTMLElement, viz: OpViz, op: OpSpec) => void };
-  return { title: panel.title, render: (body) => panel.render(body, viz, op) };
+  const panel = PANELS[viz.panel] as { title: string | ((viz: OpViz) => string); render: (body: HTMLElement, viz: OpViz, op: OpSpec) => void };
+  return { title: typeof panel.title === 'string' ? panel.title : panel.title(viz), render: (body) => panel.render(body, viz, op) };
 }
 
 export const hasViz = (op: OpSpec) => vizFor(op) !== null;
@@ -294,7 +312,7 @@ function samplingViz(body: HTMLElement, focus: Stage): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// SwiGLU: a = SiLU(g) ⊙ u
+// SwiGLU: a = SiLU(g) ⊙ u (GeGLU: GELU in place of SiLU)
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 const silu = (x: number) => x * sigmoid(x);
@@ -306,27 +324,38 @@ const GATE_SCALE = 1.6;
 const GLU_HEAD = 24;
 const GLU_TAIL = 8;
 
-function swigluViz(body: HTMLElement, focus: GluStage, width: number): void {
-  const sSilu = stageSection(body, focus === 'silu', 'SiLU(x) = x · σ(x)',
-    'The activation of the gate. Like ReLU for large |x|, but smooth, and slightly negative for negative inputs. ' +
-    'No parameters: elementwise, the same for every feature and token.');
-  sSilu.append(siluChart());
+function swigluViz(body: HTMLElement, focus: GluStage, width: number, gelu = false): void {
+  const act = gelu ? geluTanh : silu;
+  const name = gelu ? 'GELU' : 'SiLU';
+  const minX = gelu ? argmin(geluTanh, -3, 0) : SILU_MIN_X;
+  /** The share of x that passes: σ(x) for SiLU, Φ(x) (tanh form) for GELU. */
+  const share = gelu ? (x: number) => geluTanh(x) / x : sigmoid;
+  const sSilu = gelu
+    ? stageSection(body, focus === 'silu', 'GELU(x) ≈ x · Φ(x), tanh approximation',
+      'The activation of the gate (gelu_pytorch_tanh): x weighted by Φ(x), the probability that a standard normal value is ' +
+      'below x. A close cousin of SiLU, with a sharper bend and a shallower dip; PyTorch computes it in one kernel. ' +
+      'No parameters: elementwise, the same for every feature and token.')
+    : stageSection(body, focus === 'silu', 'SiLU(x) = x · σ(x)',
+      'The activation of the gate. Like ReLU for large |x|, but smooth, and slightly negative for negative inputs. ' +
+      'No parameters: elementwise, the same for every feature and token.');
+  sSilu.append(gelu ? gateGeluChart(minX) : siluChart());
   const fSilu = el('div', { className: 'op-popup-facts' });
   fSilu.innerHTML =
-    `Its minimum is <b>${silu(SILU_MIN_X).toFixed(3)}</b> at x = <b>${SILU_MIN_X.toFixed(2)}</b>; below that it rises back toward 0. ` +
-    `σ(x) is the share of x that passes: <b>${(100 * sigmoid(2)).toFixed(0)}%</b> at x = 2, <b>${(100 * sigmoid(-2)).toFixed(0)}%</b> at x = −2.`;
+    `Its minimum is <b>${act(minX).toFixed(3)}</b> at x = <b>${minX.toFixed(2)}</b>; below that it rises back toward 0. ` +
+    `${gelu ? 'Φ' : 'σ'}(x) is the share of x that passes: <b>${(100 * share(2)).toFixed(0)}%</b> at x = 2, <b>${(100 * share(-2)).toFixed(0)}%</b> at x = −2` +
+    (gelu ? ` (SiLU: ${(100 * sigmoid(2)).toFixed(0)}% and ${(100 * sigmoid(-2)).toFixed(0)}%).` : '.');
   sSilu.append(fSilu);
 
-  const sGate = stageSection(body, focus === 'gate', 'a = SiLU(g) ⊙ u',
+  const sGate = stageSection(body, focus === 'gate', `a = ${name}(g) ⊙ u`,
     `Two projections of the same input: the gate g = x · W_gate and the up projection u = x · W_up. ` +
-    `SiLU(g) decides, feature by feature, how much of u passes. Illustrative values for one token, from both ends of its ` +
+    `${name}(g) decides, feature by feature, how much of u passes. Illustrative values for one token, from both ends of its ` +
     `${formatInt(width)} d_ffn features, all on one scale.`);
   const resample = el('button', { textContent: 'Another token' });
   const row = el('div', { className: 'op-popup-control' });
   row.append(resample);
-  const cGate = barChart('SiLU(g)', 'outlines: g');
+  const cGate = barChart(`${name}(g)`, 'outlines: g');
   const cUp = barChart('u', '');
-  const cOut = barChart('a = SiLU(g) ⊙ u', 'outlines: u');
+  const cOut = barChart(`a = ${name}(g) ⊙ u`, 'outlines: u');
   const facts = el('div', { className: 'op-popup-facts' });
   sGate.append(row, cGate.root, cUp.root, cOut.root, facts);
 
@@ -340,7 +369,7 @@ function swigluViz(body: HTMLElement, focus: GluStage, width: number): void {
     const ends = bothEnds(width, GLU_HEAD, GLU_TAIL, [0, 8, 16]);
     const g = ends.values((k) => gFull[k]);
     const u = ends.values((k) => uFull[k]);
-    const sg = g.map(silu);
+    const sg = g.map(act);
     const a = sg.map((v, i) => v * u[i]);
     const all = [...g, ...u, ...a];
     const lo = Math.min(...all);
@@ -349,13 +378,13 @@ function swigluViz(body: HTMLElement, focus: GluStage, width: number): void {
     const axis = { lo, hi, gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
     const feature = (i: number) => `feature ${formatInt(ends.index(i))}`;
     const describe = (text: (i: number) => string) => (i: number) => (ends.inGap(i) ? ends.gapText('features') : `${feature(i)} · ${text(i)}`);
-    cGate.draw({ values: sg, ghost: g, ...axis, describe: describe((i) => `g = ${f(g[i])} → SiLU(g) = ${f(sg[i])}`) });
+    cGate.draw({ values: sg, ghost: g, ...axis, describe: describe((i) => `g = ${f(g[i])} → ${name}(g) = ${f(sg[i])}`) });
     cUp.draw({ values: u, ...axis, describe: describe((i) => `u = ${f(u[i])}`) });
     cOut.draw({ values: a, ghost: u, ...axis, describe: describe((i) => `${f(sg[i])} × ${f(u[i])} = ${f(a[i])}`) });
     const closed = gFull.filter((v) => v < 0).length;
     facts.innerHTML =
       `<b>${formatInt(closed)}</b> of ${formatInt(width)} gates are negative: ` +
-      `SiLU squeezes them into [${silu(SILU_MIN_X).toFixed(2)}, 0], ` +
+      `${name} squeezes them into [${act(minX).toFixed(2)}, 0], ` +
       `so those features of u barely pass (and flip sign slightly). Positive gates pass u scaled by about g. ` +
       'Cheap in FLOPs, but g, u and a are each a full T × d_ffn tensor, several times wider than the residual stream.';
   }
@@ -365,6 +394,21 @@ function swigluViz(body: HTMLElement, focus: GluStage, width: number): void {
   });
   update();
   (focus === 'gate' ? sGate : sSilu).scrollIntoView({ block: 'center' });
+}
+
+/** GeGLU's gate: GELU (tanh form) against SiLU over x ∈ [−6, 6], with the minimum marked. */
+function gateGeluChart(minX: number): HTMLElement {
+  return lineChart({
+    caption: '<span class="op-legend"><i class="swatch-line"></i>GELU(x), tanh approximation</span>' +
+      '<span class="op-legend"><i class="swatch-ref"></i>SiLU(x) = x · σ(x), SwiGLU\'s gate, for reference</span>',
+    label: 'GELU and SiLU from x = −6 to 6',
+    x: { lo: -6, hi: 6, ticks: [-6, -4, -2, 0, 2, 4, 6], tickLabel: String },
+    y: { lo: -1, hi: 6, ticks: [-1, 0, 1, 2, 3, 4, 5, 6] },
+    f: geluTanh,
+    ref: silu,
+    marker: { x: minX, label: `min ${geluTanh(minX).toFixed(3)}` },
+    describe: (x) => `x = ${x.toFixed(2)} · GELU = ${geluTanh(x).toFixed(3)} · SiLU = ${silu(x).toFixed(3)}`,
+  });
 }
 
 /** SiLU against ReLU over x ∈ [−6, 6], with a hover crosshair and the minimum marked. */
@@ -612,23 +656,31 @@ function tokens(n: number): string {
   return n >= 100 || Number.isInteger(n) ? formatInt(Math.round(n)) : n.toPrecision(2);
 }
 
-function ropeViz(body: HTMLElement, focus: RopeStage): void {
+/** `base`, `window`: a sliding-window layer's RoPE base and window (Gemma 3), in place of the model's base and context. */
+function ropeViz(body: HTMLElement, focus: RopeStage, layerBase?: number, window?: number): void {
   const dims = ropeDim(model);
   const pairs = dims / 2;
-  const base = model.ropeTheta!;
-  const theta = ropeFrequencies(model);
+  const base = layerBase ?? model.ropeTheta!;
+  const theta = ropeFrequencies(model, base);
   const dimsName = model.mla ? `${dims} RoPE dims (of ${model.headDim})` : `${dims} dimensions`;
   const yarn = model.yarn;
   const stretched = yarn ? theta.filter((t, i) => t < base ** ((-2 * i) / dims) * 0.999).length : 0;
   const wavelength = theta.map((t) => (2 * Math.PI) / t);
-  const ctx = model.maxContext;
+  // What positions must be told apart over: the window of a sliding layer, else the whole context.
+  const ctx = window ?? model.maxContext;
+  const span = window ? `${formatInt(ctx)}-token window` : `${formatInt(ctx)}-token context`;
+  const sw = model.slidingWindow;
+  const layers = !sw ? ''
+    : window ? ` These are the sliding-window layers' tables: base ${formatInt(base)}, against ${formatInt(model.ropeTheta!)} in the global layers. ` +
+      `A query here sees only ${formatInt(window)} keys back, so slow wavelengths would be wasted on it.`
+    : ` These are the global layers' tables; the sliding-window layers, which see only ${formatInt(sw.size)} keys back, use base ${formatInt(sw.ropeTheta)}.`;
 
   // 1. Frequencies.
   const sFreq = stageSection(body, focus === 'freq', 'θ_i: one frequency per dimension pair',
     `Each head's ${dimsName} form ${pairs} pairs; pair i rotates by θ_i = ` +
     `${formatInt(base)}^(−2i/${dims}) radians per token` +
     (yarn ? `, except that YaRN slows the ${stretched} slowest pairs by up to ${yarn.factor}× to stretch the ${formatInt(yarn.originalContext)}-token training context. ` : '. ') +
-    `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice.`);
+    `The cos and sin tables hold pos · θ_i for every position: the ${pairs} angles, written twice.${layers}`);
   const cFreq = barChart('wavelength 2π/θ_i in tokens (log scale), by pair', 'line: context length');
   const fFreq = el('div', { className: 'op-popup-facts' });
   sFreq.append(cFreq.root, fFreq);
@@ -636,13 +688,13 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
   cFreq.draw({
     values: logLambda, lo: 0, hi: Math.max(...logLambda, Math.log10(ctx)) * 1.05,
     ticks: [0, pairs / 4, pairs / 2, (3 * pairs) / 4, pairs - 1], tickLabel: String, yTick: (v) => tokens(10 ** v),
-    refs: [{ value: Math.log10(ctx), label: `context ${formatInt(ctx)}`, start: true }],
+    refs: [{ value: Math.log10(ctx), label: `${window ? 'window' : 'context'} ${formatInt(ctx)}`, start: true }],
     describe: (i) => `pair ${i} · θ = ${theta[i].toPrecision(3)} rad/token · one turn every ${tokens(wavelength[i])} tokens`,
   });
   const slow = wavelength.filter((l) => l > ctx).length;
   fFreq.innerHTML =
     `Wavelengths run from <b>${tokens(wavelength[0])}</b> to <b>${tokens(wavelength[pairs - 1])}</b> tokens. ` +
-    `<b>${slow}</b> of ${pairs} pairs turn less than once within the ${formatInt(ctx)}-token context: ` +
+    `<b>${slow}</b> of ${pairs} pairs turn less than once within the ${span}: ` +
     'fast pairs tell neighbors apart, slow pairs carry coarse, long-range position.';
 
   // 2. Rotation by position.
@@ -651,7 +703,8 @@ function ropeViz(body: HTMLElement, focus: RopeStage): void {
       ? `q and k${model.mla ? `'s RoPE dims` : ''} are split into pairs of neighboring dimensions (2i, 2i+1), and each pair is `
       : `q and k are split into pairs (HF rotate_half pairs dimension i with i + ${pairs}, not neighbors), and each pair is `) +
     'rotated like a 2D vector. No parameters, nothing added: the vector keeps its length, only its angles change.');
-  const maxLog = Math.round(Math.log2(ctx) * 100);
+  // Positions run over the whole context, even in a sliding layer: only distances are limited by the window.
+  const maxLog = Math.round(Math.log2(model.maxContext) * 100);
   const pos = el('input', { type: 'range', min: '0', max: String(maxLog), step: '1', value: '700' });
   const posShown = el('b');
   const posRow = el('label', { className: 'op-popup-control' });
@@ -1110,12 +1163,19 @@ function heatmap(onSelect: (row: number) => void) {
   return { root, draw };
 }
 
-function attentionViz(body: HTMLElement, focus: AttnStage): void {
+/** Keys a query sees in the popup's sliding window, scaled down from the real one to fit its few tokens. */
+const TOY_WINDOW = 4;
+
+/** `window`: the op belongs to a sliding-window layer (Gemma 3) that sees this many keys. */
+function attentionViz(body: HTMLElement, focus: AttnStage, window?: number): void {
   const n = ATTN_TOKENS.length;
   const raw = illustrativeScores();
   const perGroup = model.nHeads / model.nKvHeads;
   let selected = 8; // "it"
   let causal = true;
+  const sw = model.slidingWindow;
+  let windowed = window !== undefined;
+  const isMasked = (i: number, j: number) => causal && (j > i || (windowed && j <= i - TOY_WINDOW));
 
   // 1. Scores.
   const sScores = stageSection(body, focus === 'scores', 'QKᵀ / √d: every query against every key',
@@ -1126,7 +1186,15 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
   maskRow.append(maskBox, el('span', { textContent: 'Causal mask: a query may not see later keys (−∞ before softmax)' }));
   const hScores = heatmap((i) => select(i));
   const fScores = el('div', { className: 'op-popup-facts' });
-  sScores.append(maskRow, hScores.root, fScores);
+  sScores.append(maskRow);
+  // Models with sliding-window layers: the window as a second mask, on in those layers.
+  const windowBox = el('input', { type: 'checkbox', checked: windowed });
+  if (sw) {
+    const windowRow = el('label', { className: 'op-popup-control' });
+    windowRow.append(windowBox, el('span', { textContent: `Sliding window: only the last ${TOY_WINDOW} keys, itself included (${formatInt(sw.size)} in the model)` }));
+    sScores.append(windowRow);
+  }
+  sScores.append(hScores.root, fScores);
 
   // 2. Softmax.
   const sSoft = stageSection(body, focus === 'softmax', 'softmax over keys, row by row',
@@ -1146,20 +1214,29 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
   body.append(fCost);
   const T = pass.T;
   const decode = pass.mode === 'decode';
-  const scoreBytes = model.nHeads * (decode ? T + 1 : T * T) * DTYPES[pass.actDtype].bytes;
+  const seen = window !== undefined ? Math.min(T + 1, window) : T + 1;
+  const scoreBytes = model.nHeads * (decode ? seen : T * T) * DTYPES[pass.actDtype].bytes;
   fCost.innerHTML = decode
-    ? `In this decode step the grid is a single row: the new token (position ${formatInt(T)}) against all ` +
-      `<b>${formatInt(T + 1)}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`
+    ? (window !== undefined && T + 1 > window
+      ? `In this decode step the grid is a single row: the new token (position ${formatInt(T)}) against only the last ` +
+        `<b>${formatInt(seen)}</b> keys, its window; the sliding-window cache holds no others. Each step costs the same however long the sequence.`
+      : `In this decode step the grid is a single row: the new token (position ${formatInt(T)}) against all ` +
+        `<b>${formatInt(T + 1)}</b> cached keys, so there is nothing to mask. Each layer reads its whole K and V cache for it.`)
     : `At T = <b>${formatInt(T)}</b> each head's grid is ${formatInt(T)} × ${formatInt(T)}: ` +
       `<b>${formatBytes(scoreBytes)}</b> per layer for ${model.nHeads} heads in bf16, and eager attention allocates it several times ` +
       '(scores, masked, fp32 softmax, cast). Fused kernels (FlashAttention / SDPA) never write it: they stream key blocks ' +
       'and keep a running softmax. ' +
-      (perGroup > 1
+      (window !== undefined && T > window
+        ? `This sliding-window layer keeps only ${formatPercent(keptEntries(T, window) / (T * T))} of the grid: fused kernels skip the rest, eager attention computes it and masks it. `
+        : '') +
+      (model.nKvHeads === 1
+        ? `Multi-query attention: all ${model.nHeads} query heads share one K and V head.`
+        : perGroup > 1
         ? `Grouped-query attention: this head shares its K and V with ${perGroup - 1} other query heads.`
         : 'Multi-head attention: this head has K and V of its own, so the KV cache holds one pair per query head.');
 
   function probsOf(i: number): number[] {
-    const row = raw[i].map((v, j) => (causal && j > i ? -Infinity : v));
+    const row = raw[i].map((v, j) => (isMasked(i, j) ? -Infinity : v));
     const m = Math.max(...row);
     const e = row.map((v) => Math.exp(v - m));
     const s = e.reduce((a, b) => a + b, 0);
@@ -1173,15 +1250,19 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
 
   function update() {
     const probs = raw.map((_, i) => probsOf(i));
-    const isMasked = (i: number, j: number) => causal && j > i;
     const maxAbs = Math.max(...raw.flat().map(Math.abs));
     hScores.draw({
       value: (i, j) => raw[i][j], color: (v) => scoreColor(v, maxAbs), masked: isMasked, selected,
       describe: (i, j) => `${ATTN_TOKENS[i]} → ${ATTN_TOKENS[j]} · score ${raw[i][j].toFixed(2)}${isMasked(i, j) ? ' · masked: −∞' : ''}`,
       legend: { lo: -maxAbs, hi: maxAbs, label: 'score', format: (v) => v.toFixed(1) },
     });
-    fScores.innerHTML = causal
-      ? `<b>${(n * (n - 1)) / 2}</b> of ${n * n} scores are masked. Eager attention still computes them, then adds −∞; ` +
+    const maskedCount = raw.flatMap((r, i) => r.filter((_, j) => isMasked(i, j))).length;
+    fScores.innerHTML = causal && windowed
+      ? `<b>${maskedCount}</b> of ${n * n} scores are masked: later keys, and keys ${TOY_WINDOW} or more back. Each query sees at most ` +
+        `${TOY_WINDOW} keys however long the text, so the cache need keep only the last ${TOY_WINDOW}. Information from further back still ` +
+        'arrives, through the global layers and through earlier tokens that saw it.'
+      : causal
+      ? `<b>${maskedCount}</b> of ${n * n} scores are masked. Eager attention still computes them, then adds −∞; ` +
         'fused kernels skip those blocks, about half the work.'
       : 'Without the mask, early tokens would read later ones: fine for an encoder, but a decoder generating left to ' +
         'right cannot see the future, so training would leak the answer.';
@@ -1205,6 +1286,10 @@ function attentionViz(body: HTMLElement, focus: AttnStage): void {
   }
   maskBox.addEventListener('change', () => {
     causal = maskBox.checked;
+    update();
+  });
+  windowBox.addEventListener('change', () => {
+    windowed = windowBox.checked;
     update();
   });
   update();
@@ -1250,8 +1335,8 @@ const extentWithZero = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max
  * Charts of a d_model vector by both ends: `shown` picks the columns of a vector, and `series` gives a chart's
  * columns, range (including 0 and the columns `extra`) and hover text (from the feature index).
  */
-function normCharts() {
-  const ends = bothEnds(model.dModel, NORM_HEAD, NORM_TAIL, [0, 16]);
+function normCharts(length = model.dModel) {
+  const ends = bothEnds(length, NORM_HEAD, NORM_TAIL, [0, 16]);
   const shown = (vs: number[]) => ends.values((k) => vs[k]);
   const axis = { gap: ends.gap, ticks: ends.ticks, tickLabel: ends.tickLabel };
   const series = (vs: number[], text: (k: number) => string, extra: number[] = []) => {
@@ -1264,14 +1349,21 @@ function normCharts() {
   return { shown, series };
 }
 
-function rmsNormViz(body: HTMLElement, focus: NormStage): void {
-  // The whole d_model vector; the charts show both ends of it, and the statistics are over all of it.
-  const { base, gamma } = illustrativeToken(model.dModel);
+/** `width`: features normalized, when not d_model: one head's q or k (QK-norm). */
+function rmsNormViz(body: HTMLElement, focus: NormStage, width?: number): void {
+  // The whole vector; the charts show both ends of it, and the statistics are over all of it.
+  const length = width ?? model.dModel;
+  const { base, gamma } = illustrativeToken(length);
   const eps = model.normEps;
+  const offset = !!model.normOffset;
 
-  const sInput = stageSection(body, focus === 'input', 'x: one token',
-    `The residual stream of one token, upcast to fp32. Illustrative values for both ends of its ${formatInt(model.dModel)} ` +
-    'features (d_model), including two outliers, as real residual streams have; the statistics are over all of them.');
+  const sInput = width
+    ? stageSection(body, focus === 'input', 'x: one head of one token',
+      `QK-norm: each head's q (or k) is normalized on its own, before RoPE, so no score can grow without bound. Illustrative ` +
+      `values for both ends of one head's ${formatInt(width)} features (head_dim), upcast to fp32, with two outliers; the statistics are over all of them.`)
+    : stageSection(body, focus === 'input', 'x: one token',
+      `The residual stream of one token, upcast to fp32. Illustrative values for both ends of its ${formatInt(model.dModel)} ` +
+      'features (d_model), including two outliers, as real residual streams have; the statistics are over all of them.');
   const scale = el('input', { type: 'range', min: '-2', max: '2', step: '0.01', value: '0' });
   const scaleShown = el('b');
   const scaleRow = el('label', { className: 'op-popup-control' });
@@ -1287,19 +1379,25 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
   sMean.append(cSq.root, fMean);
 
   const sNorm = stageSection(body, focus === 'normalize', 'x / RMS(x)',
-    'Every feature times the same 1/RMS, then cast back to the activation dtype. The vector keeps its direction; its RMS becomes 1.');
+    `Every feature times the same 1/RMS, ${offset ? 'still in fp32' : 'then cast back to the activation dtype'}. The vector keeps its direction; its RMS becomes 1.`);
   const cNorm = barChart('x / RMS(x)', 'outlines: x · lines: ±1');
   const fNorm = el('div', { className: 'op-popup-facts' });
   sNorm.append(cNorm.root, fNorm);
 
-  const sWeight = stageSection(body, focus === 'weight', '× weight',
-    `A learned scale per feature: the norm's only parameters (d_model of them). Illustrative values.`);
-  const cGamma = barChart('weight', '', 'weight');
-  const cOut = barChart('x / RMS(x) · weight', 'outlines: x / RMS(x)');
+  const count = width ? `head_dim of them, shared by all heads` : 'd_model of them';
+  const sWeight = offset
+    ? stageSection(body, focus === 'weight', '× (1 + weight), then cast',
+      `A learned scale per feature: the norm's only parameters (${count}). Gemma stores each as an offset from 1, so a weight ` +
+      'of 0 (its initial value) leaves the feature as it is. Applied in fp32, then cast back to the activation dtype. Illustrative values.')
+    : stageSection(body, focus === 'weight', '× weight',
+      `A learned scale per feature: the norm's only parameters (${count}). Illustrative values.`);
+  const scaleName = offset ? '1 + weight' : 'weight';
+  const cGamma = barChart(scaleName, '', 'weight');
+  const cOut = barChart(`x / RMS(x) · ${offset ? '(1 + weight)' : 'weight'}`, 'outlines: x / RMS(x)');
   sWeight.append(cGamma.root, cOut.root);
 
   const f = normValue;
-  const { shown, series } = normCharts();
+  const { shown, series } = normCharts(length);
 
   function update() {
     const s = 10 ** Number(scale.value);
@@ -1334,7 +1432,7 @@ function rmsNormViz(body: HTMLElement, focus: NormStage): void {
       `RMS after: <b>${rmsOf(n).toFixed(3)}</b>. Move the scale slider: the outlines follow x, the bars stay the same, ` +
       `because x and RMS(x) scale together. Only when mean(x²) gets near ε (scale ×0.01) does the RMS drop below 1.`;
 
-    cGamma.draw(series(gamma, (k) => `weight = ${f(gamma[k])}`));
+    cGamma.draw(series(gamma, (k) => offset ? `1 + weight = ${f(gamma[k])} (stored: ${f(gamma[k] - 1)})` : `weight = ${f(gamma[k])}`));
     cOut.draw({ ...series(out, (k) => `${f(n[k])} × ${f(gamma[k])} = ${f(out[k])}`, shown(n)), ghost: shown(n) });
   }
   scale.addEventListener('input', update);
@@ -1608,6 +1706,14 @@ function kvCacheViz(body: HTMLElement, focus: VizStage<'kvcache'>): void {
   const keys = pass.T + (decode ? 1 : 0);
   const ctx = model.maxContext;
   const facts = (html: string) => el('div', { className: 'op-popup-facts', innerHTML: html });
+  // Sliding-window layers (Gemma 3) keep at most their window of tokens.
+  const sw = model.slidingWindow;
+  const W = sw?.size ?? Infinity;
+  const sliding = Array.from({ length: model.nLayers }, (_, l) => isSlidingLayer(model, l));
+  const nSliding = sliding.filter(Boolean).length;
+  const nGlobal = model.nLayers - nSliding;
+  /** Bytes all layers' caches hold at `L` tokens. */
+  const heldAt = (L: number) => layerToken * (nGlobal * L + nSliding * Math.min(L, W));
 
   // 1. What each token adds.
   const sToken = stageSection(body, false, 'What each token adds',
@@ -1619,15 +1725,29 @@ function kvCacheViz(body: HTMLElement, focus: VizStage<'kvcache'>): void {
       ...(p.padding ? [{ units: p.padding, cls: 'seg-zero', label: 'zeros' }] : [])],
   })), 'Cache entries of one token in one layer'));
   sToken.append(facts(
-    `<b>${formatBytes(layerToken)}</b> per token per layer (${DTYPES[pass.kvDtype].label}), <b>${formatBytes(perToken)}</b> across ${model.nLayers} layers: ` +
-    `<b>${formatBytes(perToken * keys)}</b> at ${formatInt(keys)} tokens, ${formatBytes(perToken * ctx)} at the full ${formatInt(ctx)}-token context.`));
+    `<b>${formatBytes(layerToken)}</b> per token per layer (${DTYPES[pass.kvDtype].label}), <b>${formatBytes(perToken)}</b> across ${model.nLayers} layers` +
+    (sw ? ` while the sequence fits in the window: <b>${formatBytes(heldAt(keys))}</b> at ${formatInt(keys)} tokens, ${formatBytes(heldAt(ctx))} at the full ${formatInt(ctx)}-token context.`
+      : `: <b>${formatBytes(perToken * keys)}</b> at ${formatInt(keys)} tokens, ${formatBytes(perToken * ctx)} at the full ${formatInt(ctx)}-token context.`)));
+  if (sw) {
+    // Each layer's share at this length: the global layers keep every token, the sliding ones their window.
+    const cLayers = barChart('tokens cached, by layer', `at ${formatInt(keys)} tokens`);
+    const held = sliding.map((s) => (s ? Math.min(keys, W) : keys));
+    cLayers.draw({
+      values: held, lo: 0, hi: Math.max(...held), ticks: sliding.map((_, l) => l).filter((l) => l % 5 === 0), tickLabel: (l) => `L${l}`,
+      describe: (l) => `layer ${l} · ${sliding[l] ? `sliding window: at most ${formatInt(W)}` : 'global: every token'} · ${formatInt(held[l])} tokens cached`,
+    });
+    sToken.append(cLayers.root, facts(
+      `${nSliding} of ${model.nLayers} layers attend within a ${formatInt(W)}-token sliding window, so their caches stop growing at ${formatInt(W)} tokens. ` +
+      `Past that, each new token adds only <b>${formatBytes(layerToken * nGlobal)}</b>, in the ${nGlobal} global layers: ` +
+      `${formatPercent(nGlobal / model.nLayers)} of what ${model.nLayers} global layers would add.`));
+  }
 
   // 2. Dynamic cache.
   const sDynamic = stageSection(body, focus === 'dynamic', 'Dynamic cache: torch.cat every step',
     'HF\'s default. Prefill keeps the K and V tensors as they are. Each decode step, DynamicCache.update calls torch.cat: it ' +
     'allocates a tensor one row longer and copies the whole cache into it, in every layer.');
   const unit = perToken * ctx * 2 >= 2 ** 31 ? { bytes: 2 ** 30, name: 'GiB' } : { bytes: 2 ** 20, name: 'MiB' };
-  const copied = (L: number) => (L * perToken * 2) / unit.bytes;
+  const copied = (L: number) => (heldAt(L) * 2) / unit.bytes;
   const hi = copied(ctx);
   const step = niceStep(hi / 4);
   sDynamic.append(lineChart({
@@ -1640,14 +1760,16 @@ function kvCacheViz(body: HTMLElement, focus: VizStage<'kvcache'>): void {
     ref: () => (perToken * 2) / unit.bytes,
     marker: { x: keys, label: `${formatInt(keys)} tokens` },
     snap: Math.round,
-    describe: (L) => `${formatInt(L)} cached tokens · torch.cat copies ${formatBytes(L * perToken * 2)} per step`,
+    describe: (L) => `${formatInt(L)} cached tokens · torch.cat copies ${formatBytes(heldAt(L) * 2)} per step`,
   }));
   const more = 1000;
-  const copiedOver = perToken * 2 * (more * keys + (more * (more - 1)) / 2);
+  let copiedOver = 0;
+  for (let i = 0; i < more; i++) copiedOver += heldAt(keys + i) * 2;
   sDynamic.append(facts(
-    `At ${formatInt(keys)} cached tokens each step copies <b>${formatBytes(keys * perToken * 2)}</b> (read plus write), against ` +
+    `At ${formatInt(keys)} cached tokens each step copies <b>${formatBytes(heldAt(keys) * 2)}</b> (read plus write), against ` +
     `${formatBytes(perToken * 2)} for the one new row. Generating ${formatInt(more)} more tokens copies <b>${formatBytes(copiedOver)}</b> in all: ` +
-    'the cost grows with the square of the length.'));
+    'the cost grows with the square of the length' +
+    (sw ? `, though only in the ${nGlobal} global layers: a sliding layer copies at most its ${formatInt(W)}-token window.` : '.')));
 
   // 3. Static cache.
   const cap = pass.cacheCapacity;
@@ -1658,9 +1780,16 @@ function kvCacheViz(body: HTMLElement, focus: VizStage<'kvcache'>): void {
     { units: Math.min(keys, cap), cls: 'seg-latent', label: 'written', tip: `${formatInt(Math.min(keys, cap))} slots written` },
     { units: Math.max(0, cap - keys), cls: 'seg-zero', label: 'reserved', tip: `${formatInt(Math.max(0, cap - keys))} slots allocated, not yet written` },
   ] }], 'Slots of a static cache'));
+  const allocated = layerToken * (nGlobal * cap + nSliding * Math.min(W, cap));
+  const written = heldAt(Math.min(keys, cap));
   sStatic.append(facts(
-    `Allocated: <b>${formatBytes(perToken * cap)}</b> across ${model.nLayers} layers; written so far: ${formatBytes(perToken * Math.min(keys, cap))} ` +
-    `(${formatPercent(Math.min(keys, cap) / cap)}). Each step writes ${formatBytes(perToken)}. HF attends over all slots, masking the empty ones.`));
+    `Allocated: <b>${formatBytes(allocated)}</b> across ${model.nLayers} layers; written so far: ${formatBytes(written)} ` +
+    `(${formatPercent(written / allocated)}). ` +
+    (sw
+      ? `The ${nSliding} sliding-window layers allocate only ${formatInt(Math.min(W, cap))} slots each; once those are full, each step rolls the buffer ` +
+        `left by one (a copy of the whole window) and writes the new row last. The global layers write ${formatBytes(layerToken * nGlobal)} per step. `
+      : `Each step writes ${formatBytes(perToken)}. `) +
+    'HF attends over all slots, masking the empty ones.'));
 
   (focus === 'dynamic' ? sDynamic : sStatic).scrollIntoView({ block: 'center' });
 }
