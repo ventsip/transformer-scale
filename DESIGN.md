@@ -12,7 +12,8 @@
 
 - One **floor** per stage: embedding, one per decoder layer, LM head. Floors stack along Y.
 - A layer floor has two **sections**: attention in front, MLP behind it. This keeps floors near 2.5:1
-  instead of a 5.6:1 strip. A wide gap (10,240) separates the two, so they read as separate parts.
+  instead of a 5.6:1 strip. A wide gap (10,240) separates the two, so they read as separate parts; in a mixture of
+  experts the same gap separates the router row from the expert rows behind it.
 - In each section, **stations** run left to right in data-flow order around a **bus** line. Weights sit
   behind the bus (−Z), the activations they produce in front of it (+Z).
 - Each floor shows the input it receives. A layer's output (h + m) is the next floor's `x`.
