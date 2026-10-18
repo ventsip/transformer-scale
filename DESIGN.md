@@ -24,7 +24,7 @@
 - **Operations** (`@`, RMSNorm, `+`, attention, SiLU ⊙, lookup) have no parameters, so they get no world size:
   they are screen-space labels hovering above the center of the tensor they produce. Hover for shapes and FLOPs.
 - **Edges** arc from each input up into the operation and drop straight into its output, colored by the tensor
-  kind they carry, as pipes whose diameter grows with the log of the bytes they carry. Diameters are in world
+  kind they carry, as translucent pipes (45% opacity) whose diameter grows with the log of the bytes they carry. Diameters are in world
   units (8 KiB = 65, 16 MiB ≈ 320), so pipes have perspective like the blocks; unlike the blocks they are not to scale;
   the embedding lookup counts only the rows it reads, and a selected head only its share. Moving dots show direction.
 - **Hovering a pipe** turns it white, outlines the tensor at its end (the whole tensor) and lights the op label at the

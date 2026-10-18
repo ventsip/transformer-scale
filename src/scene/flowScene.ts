@@ -127,6 +127,12 @@ export interface EdgeHit {
 /** Pipes within this many pixels of the pointer count as hovered: thin pipes are about a pixel wide. */
 const PICK_PIXELS = 6;
 const HOVER_COLOR = 0xffffff;
+/**
+ * Pipes are see-through, so blocks and other pipes behind them stay visible. They do not write depth, which keeps
+ * overlapping pipes from hiding one another by draw order. The hovered pipe is drawn solid.
+ */
+const PIPE_OPACITY = 0.45;
+const PIPE_MATERIAL = { transparent: true, opacity: PIPE_OPACITY, depthWrite: false };
 
 /**
  * Draws operations of the focused floor as labels, with pipes from inputs to op to output whose thickness
@@ -137,7 +143,7 @@ export class FlowScene {
   private readonly dotGeometry = new THREE.SphereGeometry(1, 12, 8);
   private readonly dotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private readonly materials = new Map<number, THREE.Material>();
-  private readonly loopMaterial = new THREE.MeshBasicMaterial({ color: LOOP_COLOR });
+  private readonly loopMaterial = new THREE.MeshBasicMaterial({ color: LOOP_COLOR, ...PIPE_MATERIAL });
   private readonly pulseColor = new THREE.Color(PULSE_COLOR);
   private pulseStart = -Infinity;
   private edges: Edge[] = [];
@@ -342,7 +348,7 @@ Click for an interactive view.`;
 
   private material(color: number): THREE.Material {
     let m = this.materials.get(color);
-    if (!m) this.materials.set(color, (m = new THREE.MeshBasicMaterial({ color })));
+    if (!m) this.materials.set(color, (m = new THREE.MeshBasicMaterial({ color, ...PIPE_MATERIAL })));
     return m;
   }
 
