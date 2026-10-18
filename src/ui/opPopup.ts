@@ -24,10 +24,29 @@ function swigluStage(op: OpSpec): GluStage | null {
   return null;
 }
 
+/** The stages of the RMSNorm panel. */
+type NormStage = 'input' | 'mean' | 'normalize' | 'weight';
+
+/**
+ * Which RMSNorm stage an op belongs to, from its output: x_norm or h_norm (compact, or the final × weight), or one of
+ * the expanded intermediates x_norm.fp32, .sq, .mean, .rsqrt, .n32, .n. Labels alone are ambiguous (`× weight`, `to fp32`).
+ */
+function normStage(op: OpSpec): NormStage | null {
+  const m = /^[xh]_norm(?:\.(\w+))?$/.exec(op.output.split(':')[1]);
+  if (!m) return null;
+  const step = m[1];
+  if (step === undefined) return op.label === 'RMSNorm' ? 'input' : 'weight';
+  if (step === 'fp32') return 'input';
+  if (step === 'sq' || step === 'mean' || step === 'rsqrt') return 'mean';
+  return 'normalize';
+}
+
 /** The interactive view of an op: its title and how to fill the popup body; null for ops without one. */
 function vizFor(op: OpSpec): { title: string; render: (body: HTMLElement) => void } | null {
   const sampling = samplingStage(op);
   if (sampling) return { title: 'Sampling: from logits to the next token', render: (body) => samplingViz(body, sampling) };
+  const norm = normStage(op);
+  if (norm) return { title: 'RMSNorm: x / RMS(x) · weight', render: (body) => rmsNormViz(body, norm) };
   const glu = swigluStage(op);
   if (glu) return { title: 'SwiGLU: a = SiLU(g) ⊙ u', render: (body) => swigluViz(body, glu) };
   return null;
@@ -394,8 +413,107 @@ function siluChart(): HTMLElement {
   return root;
 }
 
+// ---------------------------------------------------------------------------------------------
+// RMSNorm: x / √(mean(x²) + ε) · weight
+
+/** Features of the illustrative token vector, standing in for d_model. */
+const NORM_FEATURES = 64;
+const NORM_EPS = 1e-5;
+/** Residual streams have a few outlier features far larger than the rest ("massive activations"). */
+const OUTLIERS: [number, number][] = [[11, 14], [40, -9]];
+
+function rmsNormViz(body: HTMLElement, focus: NormStage): void {
+  const rand = rng(5);
+  const normal = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const base = Array.from({ length: NORM_FEATURES }, () => 0.8 * normal());
+  for (const [i, v] of OUTLIERS) base[i] = v;
+  // Learned scales: illustrative, mostly 0.2–0.6, smaller on the outlier features.
+  const gamma = base.map(() => Math.abs(0.4 + 0.12 * normal()));
+  for (const [i] of OUTLIERS) gamma[i] = 0.05;
+
+  const sInput = stageSection(body, focus === 'input', 'x: one token',
+    `The residual stream of one token, upcast to fp32. Illustrative: ${NORM_FEATURES} features standing in for d_model, ` +
+    'including two outliers, as real residual streams have.');
+  const scale = el('input', { type: 'range', min: '-2', max: '2', step: '0.01', value: '0' });
+  const scaleShown = el('b');
+  const scaleRow = el('label', { className: 'op-popup-control' });
+  scaleRow.append(el('span', { textContent: 'Scale x by' }), scale, scaleShown);
+  const cX = barChart('x');
+  const fX = el('div', { className: 'op-popup-facts' });
+  sInput.append(scaleRow, cX.root, fX);
+
+  const sMean = stageSection(body, focus === 'mean', 'mean(x²), then 1/√(mean(x²) + ε)',
+    'Squares, then the mean over the features: one number per token. Its reciprocal square root is the scale.');
+  const cSq = barChart('x²', 'line: mean(x²)');
+  const fMean = el('div', { className: 'op-popup-facts' });
+  sMean.append(cSq.root, fMean);
+
+  const sNorm = stageSection(body, focus === 'normalize', 'x / RMS(x)',
+    'Every feature times the same 1/RMS, then cast back to the activation dtype. The vector keeps its direction; its RMS becomes 1.');
+  const cNorm = barChart('x / RMS(x)', 'outlines: x · lines: ±1');
+  const fNorm = el('div', { className: 'op-popup-facts' });
+  sNorm.append(cNorm.root, fNorm);
+
+  const sWeight = stageSection(body, focus === 'weight', '× weight',
+    `A learned scale per feature: the norm's only parameters (d_model of them). Illustrative values.`);
+  const cGamma = barChart('weight', '', 'weight');
+  const cOut = barChart('x / RMS(x) · weight', 'outlines: x / RMS(x)');
+  sWeight.append(cGamma.root, cOut.root);
+
+  const ticks = [0, 16, 32, 48, NORM_FEATURES - 1];
+  const tickLabel = (i: number) => String(i);
+  const f = (v: number) =>
+    Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-US') : Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : v.toFixed(3);
+  const extent = (vs: number[]) => ({ lo: Math.min(0, ...vs), hi: Math.max(0, ...vs) });
+
+  function update() {
+    const s = 10 ** Number(scale.value);
+    scaleShown.textContent = `×${s < 1 ? s.toPrecision(2) : s.toFixed(s < 10 ? 2 : 1)}`;
+    const x = base.map((v) => v * s);
+    const sq = x.map((v) => v * v);
+    const ms = sq.reduce((a, b) => a + b, 0) / NORM_FEATURES;
+    const r = 1 / Math.sqrt(ms + NORM_EPS);
+    const n = x.map((v) => v * r);
+    const out = n.map((v, i) => v * gamma[i]);
+    const rmsOf = (vs: number[]) => Math.sqrt(vs.reduce((a, v) => a + v * v, 0) / vs.length);
+    const outlierShare = OUTLIERS.reduce((a, [i]) => a + sq[i], 0) / (ms * NORM_FEATURES);
+
+    cX.draw({ values: x, ...extent(x), ticks, tickLabel, describe: (i) => `feature ${i} · x = ${f(x[i])}` });
+    fX.innerHTML = `RMS(x) = <b>${f(Math.sqrt(ms))}</b>; largest |x| = <b>${f(Math.max(...x.map(Math.abs)))}</b>.`;
+
+    cSq.draw({
+      values: sq, ...extent(sq), ticks, tickLabel, refs: [{ value: ms, label: 'mean' }],
+      describe: (i) => `feature ${i} · x² = ${f(sq[i])}`,
+    });
+    fMean.innerHTML =
+      `mean(x²) = <b>${f(ms)}</b>, ε = ${NORM_EPS}, so 1/√(mean + ε) = <b>${f(r)}</b>. ` +
+      `The two outliers contribute <b>${(100 * outlierShare).toFixed(0)}%</b> of the mean: they set the scale for every other feature.`;
+
+    const nExt = extent([...n, ...x, 1, -1]);
+    cNorm.draw({
+      values: n, ghost: x, ...nExt, ticks, tickLabel, refs: [{ value: 1, label: '+1' }, { value: -1, label: '−1' }],
+      describe: (i) => `feature ${i} · ${f(x[i])} × ${f(r)} = ${f(n[i])}`,
+    });
+    fNorm.innerHTML =
+      `RMS after: <b>${rmsOf(n).toFixed(3)}</b>. Move the scale slider: the outlines follow x, the bars stay the same, ` +
+      `because x and RMS(x) scale together. Only when mean(x²) gets near ε (scale ×0.01) does the RMS drop below 1.`;
+
+    cGamma.draw({ values: gamma, ...extent(gamma), ticks, tickLabel, describe: (i) => `feature ${i} · weight = ${f(gamma[i])}` });
+    const oExt = extent([...out, ...n]);
+    cOut.draw({
+      values: out, ghost: n, ...oExt, ticks, tickLabel,
+      describe: (i) => `feature ${i} · ${f(n[i])} × ${f(gamma[i])} = ${f(out[i])}`,
+    });
+  }
+  scale.addEventListener('input', update);
+  update();
+  ({ input: sInput, mean: sMean, normalize: sNorm, weight: sWeight })[focus].scrollIntoView({ block: 'center' });
+}
+
 interface Draw {
   values: number[];
+  /** Horizontal reference lines, labeled at the right. */
+  refs?: { value: number; label: string }[];
   /** Label of the column ticks (default: rank, #1). */
   tickLabel?: (i: number) => string;
   /** Columns that get a tick label (default: ranks 1, 10, 20, …). */
@@ -413,8 +531,11 @@ interface Draw {
   percent?: boolean;
 }
 
-/** A single-series column chart in SVG, with optional outlines, removed columns, a marked column and hover tooltips. */
-function barChart(title?: string, subtitle = '') {
+/**
+ * A single-series column chart in SVG, with optional outlines, removed columns, a marked column, reference lines and
+ * hover tooltips. `tone`: weight draws the columns in the weight color.
+ */
+function barChart(title?: string, subtitle = '', tone: 'activation' | 'weight' = 'activation') {
   const W = 560;
   const H = 150;
   const pad = { l: 40, r: 8, t: 10, b: 18 };
@@ -429,7 +550,7 @@ function barChart(title?: string, subtitle = '') {
   }
   root.append(plot, tip);
 
-  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
+  function draw({ values, lo, hi, describe, ghost, removed, picked, percent, refs = [], tickLabel = (i) => `#${i + 1}`, ticks = [0, 9, 19, 29, 39] }: Draw) {
     plot.replaceChildren();
     const x0 = pad.l;
     const band = (W - pad.l - pad.r) / values.length;
@@ -442,13 +563,13 @@ function barChart(title?: string, subtitle = '') {
     for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
       plot.append(svg('line', { x1: x0, x2: W - pad.r, y1: y(v), y2: y(v), class: Math.abs(v) < 1e-9 ? 'axis' : 'grid' }));
       const label = svg('text', { x: x0 - 6, y: y(v) + 3, class: 'tick', 'text-anchor': 'end' });
-      label.textContent = percent ? `${Math.round(v * 1000) / 10}%` : String(Math.round(v * 10) / 10);
+      label.textContent = percent ? `${Math.round(v * 1000) / 10}%` : tickText(v, step);
       plot.append(label);
     }
 
     values.forEach((v, i) => {
       const cx = x0 + band * (i + 0.5);
-      const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : 'bar';
+      const cls = removed?.[i] ? 'ghost' : i === picked ? 'bar picked' : tone === 'weight' ? 'bar weight' : 'bar';
       plot.append(column(cx, barW, y(0), y(v), cls));
       // Outline on top, so it shows whether the bar is taller or shorter.
       if (ghost) plot.append(column(cx, barW, y(0), y(ghost[i]), 'ghost'));
@@ -468,6 +589,12 @@ function barChart(title?: string, subtitle = '') {
       plot.append(hit);
     });
 
+    for (const ref of refs) {
+      plot.append(svg('line', { x1: x0, x2: W - pad.r, y1: y(ref.value), y2: y(ref.value), class: 'ref' }));
+      const label = svg('text', { x: W - pad.r - 2, y: y(ref.value) - 4, class: 'tick', 'text-anchor': 'end' });
+      label.textContent = ref.label;
+      plot.append(label);
+    }
     for (const i of ticks.filter((i) => i < values.length)) {
       const label = svg('text', { x: x0 + band * (i + 0.5), y: H - 4, class: 'tick', 'text-anchor': 'middle' });
       label.textContent = tickLabel(i);
@@ -493,4 +620,12 @@ function niceStep(raw: number): number {
   const p = 10 ** Math.floor(Math.log10(raw));
   const m = raw / p;
   return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p;
+}
+
+/** An axis tick: as many decimals as the step needs, and K / M for large values so labels fit the margin. */
+function tickText(v: number, step: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e6) return `${+(v / 1e6).toPrecision(3)}M`;
+  if (a >= 1e4) return `${+(v / 1e3).toPrecision(3)}K`;
+  return v.toFixed(Math.max(0, -Math.floor(Math.log10(step))));
 }
