@@ -14,6 +14,8 @@ const ITEM_GAP = 512;
 /** Gap between a tensor and one placed beside it. */
 const BESIDE_GAP = 2048;
 const SECTION_GAP = 3072;
+/** Between the attention section and the MLP section behind it: wider, so the two read as separate parts. */
+const MLP_GAP = 10240;
 const TILE_COLS = 8;
 export const THICKNESS_PER_BYTE = 64;
 
@@ -177,7 +179,7 @@ export function layoutTensors(specs: TensorSpec[], o: LayoutOptions): Layout {
         }
         x0 += width + STATION_GAP;
       }
-      const shift = section === 0 ? 0 : behind - SECTION_GAP - maxZ;
+      const shift = section === 0 ? 0 : behind - (section === 1 ? MLP_GAP : SECTION_GAP) - maxZ;
       for (const p of local) {
         p.busZ = shift;
         for (const b of p.boxes) b.cz += shift;
